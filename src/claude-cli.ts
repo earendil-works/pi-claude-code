@@ -968,6 +968,11 @@ class ClaudeProcess {
           if (this.relay.denied) detail += `, native retries denied ${this.relay.denied}`;
           const upstreamError = this.relay.errorText();
           if (upstreamError) detail += `, upstream said: ${upstreamError.slice(0, 500)}`;
+          // A dropped stream with no upstream error is a transport failure; this
+          // wording is one Pi's retry classifier recognizes.
+          if (this.relay.status === 200 && !this.relay.capture.complete && !upstreamError) {
+            throw new Error(`Claude Code upstream stream ended before message_stop (${detail})`);
+          }
           throw new Error(`Incomplete Claude Code upstream response (${detail})`);
         }
         message = this.relay.capture.message;

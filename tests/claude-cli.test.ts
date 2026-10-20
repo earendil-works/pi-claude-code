@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
+import * as http from "node:http";
 import { chmod, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { isRetryableAssistantError, type AssistantMessage } from "@earendil-works/pi-ai";
 import {
   cachedClaudeProcessCount,
   closeClaudeProcesses,
@@ -380,6 +382,76 @@ for await (const line of input) {
     assert.equal((await readFile(processLog, "utf8")).trim().split("\n").length, 6);
   } finally {
     await closeClaudeProcesses();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("reports a dropped upstream stream as a retryable error", async () => {
+  // Anthropic answers 200, starts streaming, then the connection drops.
+  const upstream = http.createServer(async (request, response) => {
+    for await (const _chunk of request);
+    response.writeHead(200, { "content-type": "text/event-stream" });
+    const usage = { input_tokens: 2, output_tokens: 0 };
+    response.write(
+      `event: message_start\ndata: ${JSON.stringify({ type: "message_start", message: { id: "m1", role: "assistant", content: [], usage } })}\n\n`,
+    );
+    setTimeout(() => response.socket?.destroy(), 20);
+  });
+  await new Promise<void>((resolve) => upstream.listen(0, "127.0.0.1", resolve));
+  const address = upstream.address();
+  if (!address || typeof address === "string") throw new Error("missing address");
+
+  const root = await realpath(await mkdtemp(join(tmpdir(), "pi-claude-code-drop-")));
+  const executable = join(root, "fake-claude.mjs");
+  // Like Claude Code: read the stream, then retry once natively before giving up.
+  await writeFile(
+    executable,
+    `#!/usr/bin/env node
+import readline from "node:readline";
+if (process.argv.includes("auth") && process.argv.includes("status")) {
+  console.log(JSON.stringify({loggedIn: true, authMethod: "claude.ai", subscriptionType: "max"}));
+  process.exit(0);
+}
+const input = readline.createInterface({input: process.stdin, crlfDelay: Infinity});
+for await (const line of input) {
+  const frame = JSON.parse(line);
+  if (frame.type !== "user") continue;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const response = await fetch(\`\${process.env.ANTHROPIC_BASE_URL}/v1/messages\`, {method: "POST", body: "{}"});
+      await response.text();
+    } catch {}
+  }
+  console.log(JSON.stringify({type: "result", subtype: "error_during_execution", is_error: true}));
+}
+`,
+    "utf8",
+  );
+  await chmod(executable, 0o755);
+
+  try {
+    const error = await runClaudeRequest({
+      model: "sonnet",
+      cwd: root,
+      frames: [{ type: "user", message: { role: "user", content: [{ type: "text", text: "hi" }] } }],
+      systemPrompt: "system",
+      manifest: [],
+      extraBody: { tools: [] },
+      toolNames: new Set(),
+      env: { PI_CLAUDE_CODE_COMMAND: executable },
+      upstreamUrl: `http://127.0.0.1:${address.port}`,
+      timeoutMs: 5_000,
+    }).then(
+      () => assert.fail("expected the dropped stream to fail"),
+      (error: Error) => error,
+    );
+    assert.match(error.message, /status 200, capture incomplete/);
+    assert.match(error.message, /native retries denied 1/);
+    const failed = { role: "assistant", stopReason: "error", errorMessage: error.message } as AssistantMessage;
+    assert.equal(isRetryableAssistantError(failed), true);
+  } finally {
+    closeClaudeProcesses();
+    await new Promise<void>((resolve) => upstream.close(() => resolve()));
     await rm(root, { recursive: true, force: true });
   }
 });
