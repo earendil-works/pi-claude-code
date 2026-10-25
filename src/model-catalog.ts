@@ -60,6 +60,16 @@ const FALLBACK_DISCOVERY: DiscoveredClaudeModel[] = [
     supportsAutoMode: true,
   },
   {
+    value: "claude-sonnet-5-5",
+    resolvedModel: "claude-sonnet-5-5",
+    displayName: "Sonnet 5.5",
+    description: "Sonnet 5.5 · Efficient for routine tasks",
+    supportsEffort: true,
+    supportedEffortLevels: ["low", "medium", "high", "xhigh", "max"],
+    supportsAdaptiveThinking: true,
+    supportsAutoMode: true,
+  },
+  {
     value: "sonnet",
     resolvedModel: "claude-sonnet-5",
     displayName: "Sonnet",
