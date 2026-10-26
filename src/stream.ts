@@ -1,5 +1,6 @@
 import {
   calculateCost,
+  clampThinkingLevel,
   collapseSystemMessages,
   createAssistantMessageEventStream,
   getCurrentSystemPrompt,
@@ -328,6 +329,21 @@ export function normalizeError(error: unknown): string {
   return message;
 }
 
+/**
+ * Pi sends no `reasoning` when the caller wants thinking off. Claude Code then requests
+ * `thinking: {type: "disabled"}`, which Claude 5.x models reject. When Pi's model metadata
+ * says "off" is unsupported, request the lowest level the model does support instead.
+ */
+export function effectiveThinkingOptions(
+  model: Model<any>,
+  options?: SimpleStreamOptions,
+): SimpleStreamOptions | undefined {
+  if (options?.reasoning || !model.reasoning) return options;
+  const level = clampThinkingLevel(model, "off");
+  if (level === "off") return options;
+  return { ...options, reasoning: level };
+}
+
 export function streamClaudeCode(
   model: Model<any>,
   context: TranscriptContext,
@@ -366,7 +382,7 @@ export function streamClaudeCode(
       const extraBody = buildExtraBody(
         model.id,
         nativeTranscript?.requestTools ?? preparedTools.nativeTools,
-        options,
+        effectiveThinkingOptions(model, options),
       );
       const translator = new EventTranslator(model, output, stream, preparedTools.names);
 
