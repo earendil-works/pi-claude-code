@@ -252,7 +252,6 @@ for await (const line of input) {
       systemPrompt: "system",
       manifest: [],
       extraBody: { tools: [] },
-      toolNames: new Set(),
       env: {
         PI_CLAUDE_CODE_COMMAND: executable,
         EXPECTED_CWD: workingRoot,
@@ -274,7 +273,6 @@ for await (const line of input) {
       systemPrompt: "system",
       manifest: [],
       extraBody: { tools: [] },
-      toolNames: new Set<string>(),
       env: {
         PI_CLAUDE_CODE_COMMAND: executable,
         EXPECTED_CWD: workingRoot,
@@ -348,7 +346,6 @@ for await (const line of input) {
           },
         ],
       },
-      toolNames: new Set(["echo"]),
     };
     const toolCall = await runClaudeRequest({
       ...toolCommon,
