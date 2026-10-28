@@ -21,6 +21,20 @@ Claude Code owns and stores its credentials. The extension does not read its
 credential files, refresh its tokens, or persist them. Authenticated request
 headers do pass transiently through the local turn relay described below.
 
+Each turn runs Claude Code with `--setting-sources ""`, so user and project
+settings cannot inject hooks, skills, or plugins into Pi's agent loop. That also
+hides logins stored in those settings files, such as a `claude setup-token`
+value in `env.ANTHROPIC_AUTH_TOKEN`. Setting
+`PI_CLAUDE_CODE_INHERIT_SETTINGS_AUTH=1` passes only `ANTHROPIC_AUTH_TOKEN` and
+`ANTHROPIC_API_KEY` from Claude Code's `settings.json` and
+`settings.local.json` to the spawned process; it is opt-in so a settings token
+never replaces the auth the user expects Pi to use. `claude auth login`
+credentials are read by Claude Code itself and need no flag.
+
+When a turn still ends without a usable assistant message because Claude Code
+reported that it is not logged in, the error names that flag and the settings
+file that holds a token instead of only reporting an incomplete response.
+
 The provider has an ambient API-key-style auth method without a login flow. Its
 `check()` runs `claude auth status` and reports the provider as configured only
 when Claude Code is installed and logged in, so Pi hides the models otherwise.
