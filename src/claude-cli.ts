@@ -629,6 +629,29 @@ function normalizeLeadingSystemCache(system: unknown): void {
   }
 }
 
+function enforceCacheTtlOrder(payload: { tools?: unknown; system?: unknown; messages?: NativeRequestMessage[] }): void {
+  // Anthropic rejects a 1h breakpoint that follows a 5m one, and Claude Code
+  // (2.1.31x) places 5m breakpoints on injected system messages and tool
+  // results. Demote later 1h markers so a replay never overshoots that order.
+  let sawShortTtl = false;
+  const visit = (blocks: unknown): void => {
+    if (!Array.isArray(blocks)) return;
+    for (const block of blocks) {
+      if (!block || typeof block !== "object") continue;
+      const cache = (block as Record<string, unknown>).cache_control as Record<string, unknown> | undefined;
+      if (!cache || cache.type !== "ephemeral") continue;
+      if (cache.ttl === "1h") {
+        if (sawShortTtl) delete cache.ttl;
+      } else {
+        sawShortTtl = true;
+      }
+    }
+  };
+  visit(payload.tools);
+  visit(payload.system);
+  for (const message of payload.messages ?? []) visit(message.content);
+}
+
 export function rewriteInitialRequest(
   body: Buffer,
   prefix: unknown[] | undefined,
@@ -670,6 +693,7 @@ export function rewriteInitialRequest(
   }
   if (initialSystemMessages?.length || nativeSystemInjections) setReplayCacheBreakpoints(messages!);
 
+  enforceCacheTtlOrder(payload);
   return Buffer.from(JSON.stringify(payload));
 }
 
