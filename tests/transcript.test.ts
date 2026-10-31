@@ -69,6 +69,52 @@ test("prepares replay frames and groups tool results", () => {
   assert.equal(frames[2]?.shouldQuery, undefined);
 });
 
+for (const nativeReplay of [false, true]) {
+  test(`normalizes replay tool IDs and preserves linkage (${nativeReplay ? "native carrier" : "canonical"})`, () => {
+    const ids = ["call_abc-123", "call:abc/123.foo", "call:abc/123", "call:a/b", "call:a:b", "", "call:工具"];
+    const assistant: AssistantMessage = {
+      role: "assistant",
+      api: "test",
+      provider: "openai-codex",
+      model: "test",
+      content: ids.map((id) => ({ type: "toolCall", id, name: "read", arguments: { path: "a" } })),
+      usage,
+      stopReason: "toolUse",
+      timestamp: 1,
+    };
+    if (nativeReplay) {
+      assistant.diagnostics = [makeReplayDiagnostic({
+        role: "assistant",
+        content: ids.map((id) => ({
+          type: "tool_use", id, name: `${TOOL_PREFIX}read`, input: { path: "a" }, extra: "preserved",
+        })),
+      }, assistant) as never];
+    }
+    const messages: Message[] = [
+      { role: "user", content: "inspect", timestamp: 0 },
+      assistant,
+      ...ids.map((id): Message => ({
+        role: "toolResult", toolCallId: id, toolName: "read",
+        content: [{ type: "text", text: "A" }], isError: false, timestamp: 2,
+      })),
+    ];
+    const original = structuredClone(messages);
+    const frames = prepareFrames(messages);
+    const uses = frames[1]!.message.content as Array<{ id: string; extra?: string }>;
+    const results = frames[2]!.message.content as Array<{ tool_use_id: string }>;
+    assert.equal(uses[0]!.id, "call_abc-123");
+    assert.equal(uses[2]!.id, "pi_Y2FsbDphYmMvMTIz");
+    assert.equal(new Set(uses.map((block) => block.id)).size, ids.length);
+    for (let index = 0; index < ids.length; index++) {
+      assert.match(uses[index]!.id, /^[a-zA-Z0-9_-]+$/);
+      assert.equal(uses[index]!.id, results[index]!.tool_use_id);
+      if (nativeReplay) assert.equal(uses[index]!.extra, "preserved");
+    }
+    assert.deepEqual(prepareFrames(messages), frames);
+    assert.deepEqual(messages, original);
+  });
+}
+
 test("replays native signed blocks only while the visible projection is unchanged", () => {
   const assistant: AssistantMessage = {
     role: "assistant",

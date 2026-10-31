@@ -178,6 +178,25 @@ function assistantContent(message: AssistantMessage): NativeContentBlock[] {
   return canonicalAssistantContent(message);
 }
 
+function normalizeToolCallId(id: string): string {
+  if (/^[a-zA-Z0-9_-]+$/.test(id)) return id;
+  return `pi_${Buffer.from(id, "utf8").toString("base64url")}`;
+}
+
+function normalizeNativeBlock(block: unknown): unknown {
+  if (!block || typeof block !== "object") return block;
+  if ("type" in block && block.type === "tool_use" && "id" in block && typeof block.id === "string") {
+    return { ...block, id: normalizeToolCallId(block.id) };
+  }
+  if (
+    "type" in block && block.type === "tool_result" &&
+    "tool_use_id" in block && typeof block.tool_use_id === "string"
+  ) {
+    return { ...block, tool_use_id: normalizeToolCallId(block.tool_use_id) };
+  }
+  return block;
+}
+
 export function prepareFrames(messages: Message[]): NativeFrame[] {
   const frames: NativeFrame[] = [];
 
@@ -205,6 +224,7 @@ export function prepareFrames(messages: Message[]): NativeFrame[] {
       ];
     }
 
+    blocks = blocks.map(normalizeNativeBlock);
     if (blocks.length === 0) continue;
     const previous = frames.at(-1);
     if (role === "user" && previous?.type === "user") {
