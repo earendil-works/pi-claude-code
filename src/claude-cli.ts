@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { constants as fsConstants } from "node:fs";
+import { constants as fsConstants, existsSync } from "node:fs";
 import { access, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { delimiter, dirname, extname, isAbsolute, join, resolve } from "node:path";
@@ -25,6 +25,8 @@ export const INSTALL_HINT =
   "Claude Code is not installed. Install it with `npm install -g @anthropic-ai/claude-code` " +
   "or set PI_CLAUDE_CODE_COMMAND to the executable.";
 export const LOGIN_HINT = "Claude Code is installed but not logged in. Run `claude auth login` and try again.";
+/** Optional PowerShell host used to launch a configured `.ps1` Claude Code command. */
+export const POWERSHELL_ENV = "PI_CLAUDE_CODE_POWERSHELL";
 
 export interface ClaudeStatus {
   available: boolean;
@@ -35,6 +37,11 @@ export interface ClaudeStatus {
   plan?: string;
   detail?: string;
   command?: string;
+  /**
+   * Set when `claude auth status` could not be spawned, exited without a JSON
+   * payload, or returned unparsable JSON. A genuine logout leaves this unset.
+   */
+  diagnostic?: boolean;
 }
 
 export interface RunClaudeInput {
@@ -80,7 +87,20 @@ export interface RunClaudeOutput {
 }
 
 function configuredCommand(env: Record<string, string | undefined>): string {
-  return env.PI_CLAUDE_CODE_COMMAND || "claude";
+  return envValue(env, "PI_CLAUDE_CODE_COMMAND") || "claude";
+}
+
+/**
+ * Read an environment entry. Windows environment blocks are case-insensitive
+ * (`Path`, not `PATH`), and copying `process.env` into a plain object loses
+ * Node's case-insensitive proxy, so look the name up case-insensitively there.
+ */
+function envValue(env: Record<string, string | undefined>, name: string): string | undefined {
+  const direct = env[name];
+  if (direct !== undefined) return direct;
+  if (process.platform !== "win32") return undefined;
+  const key = Object.keys(env).find((candidate) => candidate.toLowerCase() === name.toLowerCase());
+  return key === undefined ? undefined : env[key];
 }
 
 async function executable(path: string): Promise<boolean> {
@@ -92,37 +112,59 @@ async function executable(path: string): Promise<boolean> {
   }
 }
 
-export async function resolveClaudeExecutable(
-  env: Record<string, string | undefined> = process.env,
-): Promise<string | undefined> {
-  const command = configuredCommand(env);
-  if (isAbsolute(command) || command.includes("/") || command.includes("\\")) {
-    const candidate = resolve(command);
-    return (await executable(candidate)) ? candidate : undefined;
-  }
+/** Candidate paths for a command name, in the order Windows would resolve them. */
+function commandCandidates(command: string, env: Record<string, string | undefined>): string[] {
+  if (isAbsolute(command) || command.includes("/") || command.includes("\\")) return [resolve(command)];
 
   const extensions =
     process.platform === "win32"
-      ? (env.PATHEXT || ".COM;.EXE;.BAT;.CMD").split(";").flatMap((suffix) => [suffix, suffix.toLowerCase()])
+      ? (envValue(env, "PATHEXT") || ".COM;.EXE;.BAT;.CMD").split(";").flatMap((suffix) => [suffix, suffix.toLowerCase()])
       : [""];
-  for (const directory of (env.PATH || "").split(delimiter)) {
+  const candidates: string[] = [];
+  for (const directory of (envValue(env, "PATH") || "").split(delimiter)) {
     if (!directory) continue;
     for (const suffix of extensions) {
-      const candidate = join(directory, process.platform === "win32" && extname(command) ? command : command + suffix);
-      if (await executable(candidate)) return candidate;
+      candidates.push(join(directory, process.platform === "win32" && extname(command) ? command : command + suffix));
     }
   }
+  return candidates;
+}
+
+export async function resolveClaudeExecutable(
+  env: Record<string, string | undefined> = process.env,
+): Promise<string | undefined> {
+  for (const candidate of commandCandidates(configuredCommand(env), env)) {
+    if (await executable(candidate)) return candidate;
+  }
   return undefined;
+}
+
+/**
+ * PowerShell host for a configured `.ps1` command. Noninteractive and
+ * deterministic: an explicit override wins, then PowerShell 7 (`pwsh`) because
+ * its native argument forwarding preserves embedded quotes, then the Windows
+ * PowerShell that ships with every supported Windows release.
+ */
+function resolvePowerShell(env: Record<string, string | undefined>): string {
+  const configured = envValue(env, POWERSHELL_ENV)?.trim();
+  if (configured) return configured;
+  for (const command of ["pwsh", "powershell"]) {
+    const candidate = commandCandidates(command, env).find((path) => existsSync(path));
+    if (candidate) return candidate;
+  }
+  return "powershell.exe";
 }
 
 function withConfigDirectory(env: Record<string, string | undefined>): Record<string, string> {
   const output: Record<string, string> = {};
   for (const [key, value] of Object.entries(env)) if (value !== undefined) output[key] = value;
-  if (output.PI_CLAUDE_CODE_CONFIG_DIR) output.CLAUDE_CONFIG_DIR = output.PI_CLAUDE_CODE_CONFIG_DIR;
+  const configDir = envValue(output, "PI_CLAUDE_CODE_CONFIG_DIR");
+  if (configDir) output.CLAUDE_CONFIG_DIR = configDir;
   return output;
 }
 
-async function captureProcess(
+/** Run a Claude Code command to completion and capture its output. Exported for tests. */
+export async function captureProcess(
   command: string,
   args: string[],
   env: Record<string, string>,
@@ -151,6 +193,29 @@ async function captureProcess(
   }
 }
 
+function outputTail(text: string, limit = 500): string {
+  const trimmed = text.trim();
+  return trimmed.length > limit ? `...${trimmed.slice(-limit)}` : trimmed;
+}
+
+/** Parse the `claude auth status` payload, tolerating leading non-JSON noise. */
+function statusPayload(stdout: string): Record<string, unknown> | undefined {
+  const text = stdout.trim();
+  if (!text) return undefined;
+  const candidates = [text];
+  const brace = text.indexOf("{");
+  if (brace > 0) candidates.push(text.slice(brace));
+  for (const candidate of candidates) {
+    try {
+      const parsed: unknown = JSON.parse(candidate);
+      if (parsed && typeof parsed === "object") return parsed as Record<string, unknown>;
+    } catch {
+      // Try the next candidate; a parse failure is reported by the caller.
+    }
+  }
+  return undefined;
+}
+
 export async function getClaudeStatus(
   envInput: Record<string, string | undefined> = process.env,
   signal?: AbortSignal,
@@ -158,26 +223,50 @@ export async function getClaudeStatus(
   const env = withConfigDirectory(envInput);
   const command = await resolveClaudeExecutable(env);
   if (!command) return { available: false, loggedIn: false, subscription: false, detail: INSTALL_HINT };
+
+  let result: { code: number; stdout: string; stderr: string };
   try {
-    const result = await captureProcess(command, ["auth", "status"], env, signal);
-    const payload = result.stdout.trim().startsWith("{")
-      ? (JSON.parse(result.stdout) as { loggedIn?: unknown; authMethod?: unknown; subscriptionType?: unknown })
-      : {};
-    const loggedIn = payload.loggedIn === true;
-    const plan = typeof payload.subscriptionType === "string" ? payload.subscriptionType : undefined;
-    return {
-      available: true,
-      loggedIn,
-      subscription: loggedIn && !!plan,
-      command,
-      authMethod: typeof payload.authMethod === "string" ? payload.authMethod : undefined,
-      plan,
-      detail: loggedIn ? undefined : LOGIN_HINT,
-    };
+    result = await captureProcess(command, ["auth", "status"], env, signal);
   } catch (error) {
     if (signal?.aborted) throw error;
-    return { available: true, loggedIn: false, subscription: false, command, detail: LOGIN_HINT };
+    const message = error instanceof Error ? error.message : String(error);
+    return {
+      available: true,
+      loggedIn: false,
+      subscription: false,
+      command,
+      diagnostic: true,
+      detail: `Claude Code status check failed: ${message}`,
+    };
   }
+
+  const payload = statusPayload(result.stdout);
+  if (!payload) {
+    // A launch or CLI failure must not masquerade as a logged-out account.
+    const output = outputTail(result.stdout) || outputTail(result.stderr) || "(no output)";
+    return {
+      available: true,
+      loggedIn: false,
+      subscription: false,
+      command,
+      diagnostic: true,
+      detail: `Claude Code status check failed (exit ${result.code}): unexpected auth status output: ${output}`,
+    };
+  }
+
+  // Claude Code reports a logout as JSON with `loggedIn: false`, sometimes with
+  // a non-zero exit code. Only a JSON payload is authoritative for login state.
+  const loggedIn = payload.loggedIn === true;
+  const plan = typeof payload.subscriptionType === "string" ? payload.subscriptionType : undefined;
+  return {
+    available: true,
+    loggedIn,
+    subscription: loggedIn && !!plan,
+    command,
+    authMethod: typeof payload.authMethod === "string" ? payload.authMethod : undefined,
+    plan,
+    detail: loggedIn ? undefined : LOGIN_HINT,
+  };
 }
 
 const READY_STATUS_TTL_MS = 60_000;
@@ -193,7 +282,13 @@ async function readyClaudeCommand(
   signal?: AbortSignal,
 ): Promise<string> {
   const env = withConfigDirectory(envInput);
-  const key = JSON.stringify([configuredCommand(env), env.PATH, env.HOME, env.CLAUDE_CONFIG_DIR]);
+  const key = JSON.stringify([
+    configuredCommand(env),
+    envValue(env, "PATH"),
+    envValue(env, "HOME") ?? envValue(env, "USERPROFILE"),
+    env.CLAUDE_CONFIG_DIR,
+    envValue(env, POWERSHELL_ENV),
+  ]);
   const cached = readyStatusCache.get(key);
   if (cached && cached.expires > Date.now()) return cached.command;
 
@@ -201,7 +296,7 @@ async function readyClaudeCommand(
   if (!status.available || !status.command) throw new Error(INSTALL_HINT);
   if (!status.loggedIn) {
     readyStatusCache.delete(key);
-    throw new Error(LOGIN_HINT);
+    throw new Error(status.detail ?? LOGIN_HINT);
   }
   readyStatusCache.set(key, { command: status.command, expires: Date.now() + READY_STATUS_TTL_MS });
   return status.command;
@@ -316,16 +411,64 @@ export async function discoverClaudeModels(
   }
 }
 
-function spawnCommand(
+// cmd.exe reparses the whole `/c` string, so tokens need cmd-level escaping in
+// addition to the quoting the receiving program's own command line parser
+// (CommandLineToArgvW) expects. The token rules below follow https://qntm.org/cmd.
+const CMD_META_CHARS = /([()\][%!^"`<>&|;, *?])/gu;
+
+function escapeCmdCommand(value: string): string {
+  return value.replace(CMD_META_CHARS, "^$1");
+}
+
+function escapeCmdArgument(value: string): string {
+  // Double backslashes that precede a quote, or that would precede the closing
+  // quote added below, so the child's parser restores them verbatim.
+  const quoted = `"${value.replace(/(?=(\\+?)?)\1"/gu, '$1$1\\"').replace(/(?=(\\+?)?)\1$/u, "$1$1")}"`;
+  return quoted.replace(CMD_META_CHARS, "^$1");
+}
+
+/** PowerShell single-quoted literal: everything is literal except `'`, which doubles. */
+function powershellLiteral(value: string): string {
+  return `'${value.replace(/'/gu, "''")}'`;
+}
+
+/**
+ * Launch a configured `.ps1` Claude Code command through a noninteractive
+ * PowerShell. The script text travels as `-EncodedCommand` so the Windows
+ * command line parser never sees the scripts' arguments.
+ */
+function spawnPowerShellScript(
   command: string,
   args: string[],
   options: Parameters<typeof spawn>[2],
 ): ChildProcess {
-  if (process.platform === "win32" && /\.(?:cmd|bat)$/iu.test(command)) {
-    const comspec = options?.env?.COMSPEC || process.env.COMSPEC || "cmd.exe";
-    const quote = (value: string) => `"${value.replace(/"/gu, '""')}"`;
-    return spawn(comspec, ["/d", "/s", "/c", [quote(command), ...args.map(quote)].join(" ")], options);
+  const shell = resolvePowerShell(options?.env ?? process.env);
+  const script = [`& ${powershellLiteral(command)}`, ...args.map(powershellLiteral)].join(" ");
+  const encoded = Buffer.from(script, "utf16le").toString("base64");
+  return spawn(
+    shell,
+    ["-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand", encoded],
+    options,
+  );
+}
+
+/**
+ * Spawn Claude Code. `.cmd`/`.bat` shims need a cmd.exe command line that is
+ * escaped once and passed verbatim; `.ps1` needs a PowerShell host. Native
+ * executables (and every POSIX command) are spawned directly.
+ */
+export function spawnCommand(
+  command: string,
+  args: string[],
+  options: Parameters<typeof spawn>[2],
+): ChildProcess {
+  if (process.platform !== "win32") return spawn(command, args, options);
+  if (/\.(?:cmd|bat)$/iu.test(command)) {
+    const comspec = envValue(options?.env ?? {}, "COMSPEC") || process.env.COMSPEC || "cmd.exe";
+    const line = `"${[escapeCmdCommand(command), ...args.map(escapeCmdArgument)].join(" ")}"`;
+    return spawn(comspec, ["/d", "/s", "/c", line], { ...options, windowsVerbatimArguments: true });
   }
+  if (/\.ps1$/iu.test(command)) return spawnPowerShellScript(command, args, options);
   return spawn(command, args, options);
 }
 

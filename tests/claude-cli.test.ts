@@ -143,9 +143,9 @@ test("injects native system history at assistant boundaries", () => {
 test("runs a request through a stream-json Claude executable", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-claude-code-test-"));
   const workingRoot = await realpath(root);
-  const executable = join(root, "fake-claude.mjs");
+  const script = join(root, "fake-claude.mjs");
   await writeFile(
-    executable,
+    script,
     `#!/usr/bin/env node
 import readline from "node:readline";
 import {appendFileSync, readFileSync} from "node:fs";
@@ -211,6 +211,12 @@ for await (const line of input) {
 `,
     "utf8",
   );
+  // Windows cannot execute a shebang script directly; go through a .cmd shim,
+  // which also exercises the extension's cmd.exe launch path.
+  const executable = process.platform === "win32" ? join(root, "fake-claude.cmd") : script;
+  if (executable !== script) {
+    await writeFile(executable, `@ECHO off\r\n"${process.execPath}" "${script}" %*\r\n`, "utf8");
+  }
   await chmod(executable, 0o755);
 
   const events: string[] = [];

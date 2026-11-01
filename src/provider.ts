@@ -1,9 +1,14 @@
 import { createProvider, type AuthContext, type ProviderEnv } from "@earendil-works/pi-ai";
-import { discoverClaudeModels, getClaudeStatus, LOGIN_HINT } from "./claude-cli.ts";
+import { discoverClaudeModels, getClaudeStatus, LOGIN_HINT, POWERSHELL_ENV } from "./claude-cli.ts";
 import { API_ID, CLAUDE_CODE_MODELS, modelFromDiscovery, PROVIDER_ID } from "./model-catalog.ts";
 import { streamClaudeCode } from "./stream.ts";
 
-const PROVIDER_ENV_NAMES = ["PI_CLAUDE_CODE_COMMAND", "PI_CLAUDE_CODE_CONFIG_DIR", "CLAUDE_CONFIG_DIR"] as const;
+const PROVIDER_ENV_NAMES = [
+  "PI_CLAUDE_CODE_COMMAND",
+  "PI_CLAUDE_CODE_CONFIG_DIR",
+  "CLAUDE_CONFIG_DIR",
+  POWERSHELL_ENV,
+] as const;
 
 async function providerEnvironment(ctx: AuthContext): Promise<ProviderEnv | undefined> {
   const env: ProviderEnv = {};
@@ -81,7 +86,7 @@ export function createClaudeCodeProvider() {
         },
         async refresh(_credential, signal) {
           const status = await getClaudeStatus(claudeCodeEnv(), signal);
-          if (!status.subscription) throw new Error(LOGIN_HINT);
+          if (!status.subscription) throw new Error(status.detail ?? LOGIN_HINT);
           return externalOAuthMarker();
         },
         async toAuth() {
