@@ -85,6 +85,46 @@ test("stabilizes Claude Code's native replay reminders and cache breakpoint", ()
   );
 });
 
+test("keeps native replay within four cache breakpoints when Claude Code marks another tail block", () => {
+  const marker = { type: "ephemeral", ttl: "1h" };
+  const canonical = [{ type: "text", text: "run echo" }];
+  const body = {
+    system: [
+      { type: "text", text: "billing" },
+      { type: "text", text: "identity", cache_control: marker },
+      { type: "text", text: "prompt", cache_control: marker },
+    ],
+    tools: [{ name: "mcp__pi__bash", cache_control: marker }],
+    messages: [
+      { role: "user", content: canonical },
+      { role: "system", content: "environment" },
+      { role: "assistant", content: [{ type: "tool_use", id: "t1", name: "mcp__pi__bash", input: {} }] },
+      { role: "user", content: [{ type: "tool_result", tool_use_id: "t1", content: "hi" }] },
+      {
+        role: "system",
+        content: [
+          { type: "text", text: "date reminder", cache_control: marker },
+          { type: "text", text: "token reminder" },
+        ],
+      },
+    ],
+  };
+  const initialSystemMessages = [{ role: "system", content: [{ type: "text", text: "environment", cache_control: marker }] }];
+
+  const rewritten = rewriteInitialRequest(
+    Buffer.from(JSON.stringify(body)),
+    undefined,
+    canonical,
+    initialSystemMessages,
+    [],
+  ).toString("utf8");
+
+  assert.equal(rewritten.match(/"cache_control"/g)?.length, 4);
+  const payload = JSON.parse(rewritten) as typeof body;
+  assert.deepEqual((payload.messages[1]?.content as Array<Record<string, unknown>>)[0]?.cache_control, marker);
+  assert.deepEqual((payload.messages.at(-1)?.content as Array<Record<string, unknown>>).at(-1)?.cache_control, marker);
+});
+
 test("injects native system history at assistant boundaries", () => {
   const body = {
     system: [
