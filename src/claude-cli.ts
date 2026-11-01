@@ -1399,7 +1399,7 @@ export async function runClaudeRequest(input: RunClaudeInput): Promise<RunClaude
         if (attempt > 1) error.message += ` [gave up after ${attempt} attempts]`;
         throw error;
       }
-      // Forget cached readiness and respawn cold with a full replay (Jean-visible loops on 2026-10-26).
+      // Forget cached readiness and respawn cold with a full replay (owner-visible loops on 2026-10-26).
       readyStatusCache.clear();
       await sleep(baseDelay * 2 ** (attempt - 1), input.signal);
     }
