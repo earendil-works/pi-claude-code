@@ -225,7 +225,7 @@ export async function discoverClaudeModels(
   timeoutMs = 20_000,
 ): Promise<DiscoveredClaudeModel[]> {
   signal?.throwIfAborted();
-  const env = processEnvironment(envInput, {});
+  const env = processEnvironment(envInput, {}, "discovery");
   const command = await resolveClaudeExecutable(env);
   if (!command) throw new Error(INSTALL_HINT);
 
@@ -423,6 +423,7 @@ function conflictingEnvironment(env: Record<string, string>): string[] {
 function processEnvironment(
   input: Record<string, string | undefined> | undefined,
   extraBody: Record<string, unknown>,
+  purpose: "request" | "discovery" = "request",
 ): Record<string, string> {
   const env = withConfigDirectory({ ...process.env, ...input });
   const conflicts = conflictingEnvironment(env);
@@ -432,14 +433,22 @@ function processEnvironment(
   delete env.CLAUDE_CODE_EXTRA_BODY;
   Object.assign(env, {
     ENABLE_TOOL_SEARCH: "false",
-    CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
+    DISABLE_AUTOUPDATER: "1",
+    DISABLE_FEEDBACK_COMMAND: "1",
+    CLAUDE_CODE_DISABLE_OFFICIAL_MARKETPLACE_AUTOINSTALL: "1",
     CLAUDE_CODE_MAX_RETRIES: "0",
     DISABLE_AUTO_COMPACT: "1",
     DISABLE_COMPACT: "1",
     CLAUDE_CODE_TOTAL_TOKENS_REMINDER: "off",
-    DISABLE_TELEMETRY: "1",
     DISABLE_ERROR_REPORTING: "1",
   });
+  // These flags also disable the feature flags that unlock Claude Code's served
+  // model catalog. Discovery inherits the user's choices instead of forcing them;
+  // conversation workers remain isolated from nonessential traffic.
+  if (purpose === "request") {
+    env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = "1";
+    env.DISABLE_TELEMETRY = "1";
+  }
   if (typeof extraBody.max_tokens === "number") env.CLAUDE_CODE_MAX_OUTPUT_TOKENS = String(extraBody.max_tokens);
   return env;
 }
