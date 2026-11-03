@@ -140,6 +140,11 @@ test("injects native system history at assistant boundaries", () => {
   );
 });
 
+const userFrame = (text: string) => ({
+  type: "user" as const,
+  message: { role: "user" as const, content: [{ type: "text", text }] },
+});
+
 test("runs a request through a stream-json Claude executable", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-claude-code-test-"));
   const workingRoot = await realpath(root);
@@ -161,6 +166,9 @@ if (systemIndex >= 0 && readFileSync(process.argv[systemIndex + 1], "utf8") !== 
 }
 const input = readline.createInterface({input: process.stdin, crlfDelay: Infinity});
 let queryCount = 0;
+// Real Claude Code echoes a frame's uuid on that frame's result.
+const echoUuid = frame => frame.uuid ? {user_message_uuids: [frame.uuid]} : {};
+const strayResult = {type: "result", subtype: "error_during_execution", is_error: true, num_turns: 0};
 for await (const line of input) {
   const frame = JSON.parse(line);
   if (frame.type === "control_request" && frame.request?.subtype === "initialize") {
@@ -180,7 +188,7 @@ for await (const line of input) {
     continue;
   }
   if (frame.shouldQuery === false) {
-    console.log(JSON.stringify({type: "result", num_turns: 0}));
+    console.log(JSON.stringify({type: "result", num_turns: 0, ...echoUuid(frame)}));
     continue;
   }
   if (frame.type !== "user") continue;
@@ -193,7 +201,13 @@ for await (const line of input) {
     const content = [{type: "tool_use", id: "tool_fake", name: "mcp__pi__echo", input: {value: "test"}}];
     console.log(JSON.stringify({type: "stream_event", event: {type: "message_stop"}}));
     console.log(JSON.stringify({type: "assistant", message: {id, role: "assistant", content, stop_reason: "tool_use", usage}}));
-    console.log(JSON.stringify({type: "result", subtype: "error_max_turns", is_error: true, usage}));
+    console.log(JSON.stringify({type: "result", subtype: "error_max_turns", is_error: true, usage, ...echoUuid(frame)}));
+    continue;
+  }
+  if (process.env.NATIVE_ERROR) {
+    const content = [{type: "text", text: "Usage limit"}];
+    console.log(JSON.stringify({type: "assistant", error: "rate_limit", message: {id, role: "assistant", content, usage}}));
+    console.log(JSON.stringify({type: "result", subtype: "success", is_error: true, usage, ...echoUuid(frame)}));
     continue;
   }
   const events = [
@@ -206,7 +220,10 @@ for await (const line of input) {
   ];
   for (const event of events) console.log(JSON.stringify({type: "stream_event", event}));
   console.log(JSON.stringify({type: "assistant", message: {id, role: "assistant", content: [{type: "text", text}], stop_reason: "end_turn", usage}}));
-  console.log(JSON.stringify({type: "result", subtype: "success", is_error: false, usage}));
+  console.log(JSON.stringify({type: "result", subtype: "success", is_error: false, usage, ...echoUuid(frame)}));
+  // A result no turn waits for stays buffered until the next turn reads it.
+  if (process.env.STALE_RESULT === "foreign") console.log(JSON.stringify({...strayResult, user_message_uuids: ["other"]}));
+  if (process.env.STALE_RESULT === "bare") console.log(JSON.stringify(strayResult));
 }
 `,
     "utf8",
@@ -378,6 +395,35 @@ for await (const line of input) {
     });
     assert.equal(afterTool.message.id, "m_fake");
     assert.equal((await readFile(processLog, "utf8")).trim().split("\n").length, 6);
+
+    // A late result for another user message must not end the next warm turn.
+    const warmTurns = async (sessionId: string, extra: Record<string, string>) => {
+      const warm = { ...common, env: { ...common.env, ...extra }, sessionId };
+      const one = await runClaudeRequest({ ...warm, frames: [userFrame("one")] });
+      return runClaudeRequest({
+        ...warm,
+        frames: [
+          { ...userFrame("one"), shouldQuery: false },
+          { type: "assistant", message: { role: "assistant", content: one.message.content } },
+          userFrame("two"),
+        ],
+      });
+    };
+    const foreign = await warmTurns("foreign-session", { STALE_RESULT: "foreign" });
+    assert.equal(foreign.message.id, "m_fake_2");
+    assert.equal((await readFile(processLog, "utf8")).trim().split("\n").length, 7);
+
+    // A stray result without a uuid fails the warm turn before any output, so
+    // it is replayed once on a fresh process.
+    const bare = await warmTurns("bare-session", { STALE_RESULT: "bare" });
+    assert.equal(bare.message.id, "m_fake");
+    assert.equal((await readFile(processLog, "utf8")).trim().split("\n").length, 9);
+
+    // A native error assistant reports its text, not an incomplete response.
+    await assert.rejects(
+      runClaudeRequest({ ...common, env: { ...common.env, NATIVE_ERROR: "1" }, frames: [userFrame("one")] }),
+      /Claude Code API error: Usage limit/,
+    );
   } finally {
     await closeClaudeProcesses();
     await rm(root, { recursive: true, force: true });
