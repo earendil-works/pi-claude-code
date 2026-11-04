@@ -12,7 +12,7 @@ import {
   type Tool,
   type ToolResultMessage,
 } from "@earendil-works/pi-ai";
-import { supportsAdaptiveThinking } from "./model-catalog.ts";
+import { supportsAdaptiveThinking, supportsDisabledThinking } from "./model-catalog.ts";
 import type { NativeContentBlock, NativeFrame, NativeMessage } from "./native-types.ts";
 
 export const TOOL_PREFIX = "mcp__pi__";
@@ -374,6 +374,10 @@ export function buildExtraBody(
     body.output_config = {
       effort: options.reasoning === "minimal" ? "low" : options.reasoning,
     };
+  } else if (!supportsDisabledThinking(modelId)) {
+    // Models such as Opus 5.5 reject `disabled`; use the lowest adaptive effort instead.
+    body.thinking = { type: "adaptive" };
+    body.output_config = { effort: "low" };
   } else {
     body.thinking = { type: "disabled" };
     // Native clear-thinking edits are invalid when thinking is disabled.
