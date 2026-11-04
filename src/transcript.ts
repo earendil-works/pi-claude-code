@@ -6,6 +6,7 @@ import {
   type AssistantMessage,
   type ImageContent,
   type Message,
+  type Model,
   type SimpleStreamOptions,
   type SystemMessage,
   type TextContent,
@@ -52,6 +53,40 @@ interface AssistantProjection {
 
 function sanitizeSurrogates(text: string): string {
   return text.replace(/[\uD800-\uDFFF]/gu, "\uFFFD");
+}
+
+function nativeToolUseId(id: string): string {
+  return id.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 64);
+}
+
+export function prepareMessages(messages: Message[], model: Model<any>): Message[] {
+  const toolCallIds = new Map<string, string>();
+  return messages.map((message) => {
+    if (message.role === "toolResult") {
+      const id = toolCallIds.get(message.toolCallId);
+      return id && id !== message.toolCallId ? { ...message, toolCallId: id } : message;
+    }
+    if (
+      message.role !== "assistant" ||
+      (message.provider === model.provider && message.api === model.api && message.model === model.id)
+    ) {
+      return message;
+    }
+    return {
+      ...message,
+      diagnostics: message.diagnostics?.filter((item) => item.type !== NATIVE_REPLAY_DIAGNOSTIC),
+      content: message.content.flatMap((block): AssistantMessage["content"] => {
+        // Like pi-ai, drop thinking from other models: signatures only validate
+        // for their own model, and replaying it as text reads as visible reply.
+        if (block.type === "thinking") return [];
+        if (block.type === "text") return [{ type: "text", text: block.text }];
+        const id = nativeToolUseId(block.id);
+        toolCallIds.set(block.id, id);
+        const { thoughtSignature, ...toolCall } = block;
+        return [{ ...toolCall, id }];
+      }),
+    };
+  });
 }
 
 function clone<T>(value: T): T {

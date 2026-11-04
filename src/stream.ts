@@ -26,6 +26,7 @@ import {
   makeReplayDiagnostic,
   NATIVE_TOOL_CHANGES_BETA,
   prepareFrames,
+  prepareMessages,
   prepareNativeTranscript,
   prepareTools,
   TOOL_PREFIX,
@@ -330,7 +331,7 @@ export function normalizeError(error: unknown): string {
 
 export function streamClaudeCode(
   model: Model<any>,
-  context: TranscriptContext,
+  sourceContext: TranscriptContext,
   options?: SimpleStreamOptions,
 ): AssistantMessageEventStream {
   const stream = createAssistantMessageEventStream();
@@ -347,6 +348,7 @@ export function streamClaudeCode(
 
   void (async () => {
     try {
+      const context = { ...sourceContext, messages: prepareMessages(sourceContext.messages, model) };
       const nativeTranscript = prepareNativeTranscript(
         context.messages,
         supportsNativeToolChanges(model.id),
