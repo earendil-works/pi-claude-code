@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
 import { access, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -445,14 +445,23 @@ function processEnvironment(
   return env;
 }
 
-async function writeFrame(child: ChildProcess, frame: NativeFrame): Promise<void> {
+/** Writes a frame stamped with a fresh uuid, which Claude Code echoes back on that frame's result. */
+async function writeFrame(child: ChildProcess, frame: NativeFrame): Promise<string> {
   if (!child.stdin?.writable) throw new Error("Claude Code stdin closed during history replay");
-  if (!child.stdin.write(`${JSON.stringify(frame)}\n`)) {
+  const uuid = randomUUID();
+  if (!child.stdin.write(`${JSON.stringify({ ...frame, uuid })}\n`)) {
     await new Promise<void>((resolve, reject) => {
       child.stdin!.once("drain", resolve);
       child.stdin!.once("error", reject);
     });
   }
+  return uuid;
+}
+
+/** True when the result names user messages and this turn's frame is not one of them. */
+function resultIsForAnotherMessage(result: NativeResult, uuid: string): boolean {
+  const ids = result.user_message_uuids;
+  return Array.isArray(ids) && ids.length > 0 && !ids.includes(uuid);
 }
 
 function nativeErrorText(event: Extract<NativeOutputEvent, { type: "assistant" }>): string | undefined {
@@ -735,6 +744,7 @@ class ClaudeProcess {
   private tipHash?: string;
   private expiryTimer?: NodeJS.Timeout;
   private closed = false;
+  private delivered = false;
   private stderr = "";
 
   private constructor(
@@ -892,12 +902,19 @@ class ClaudeProcess {
     return true;
   }
 
+  /** True once the current turn streamed output or reached the upstream API. */
+  get startedOutput(): boolean {
+    return this.delivered || this.relay.used;
+  }
+
   async run(input: RunClaudeInput, continuation: boolean): Promise<RunClaudeOutput> {
     if (!this.isAlive()) throw new Error("Claude Code process is no longer available");
     input.signal?.throwIfAborted();
 
     let sawMessageStop = false;
+    this.delivered = false;
     const deliver = (event: AnthropicStreamEvent) => {
+      this.delivered = true;
       if (event.type === "message_stop") sawMessageStop = true;
       input.onEvent?.(event);
     };
@@ -925,12 +942,13 @@ class ClaudeProcess {
     const assistants: NativeMessage[] = [];
     let result: NativeResult | undefined;
     let nativeError: string | undefined;
+    let turnUuid: string | undefined;
     let rateLimit: RateLimitInfo | undefined;
 
     try {
       const frames = continuation ? input.frames.slice(-1) : input.frames;
       for (const frame of frames) {
-        await writeFrame(this.child, frame);
+        const uuid = await writeFrame(this.child, frame);
         if (frame.shouldQuery === false) {
           for (;;) {
             const event = await this.queue.next(input.signal, this.timeoutMs);
@@ -942,6 +960,8 @@ class ClaudeProcess {
               break;
             }
           }
+        } else {
+          turnUuid = uuid;
         }
       }
 
@@ -953,6 +973,8 @@ class ClaudeProcess {
           if (error !== undefined) nativeError = error;
           else assistants.push(event.message);
         } else if (event.type === "result") {
+          // A late result from an earlier turn may still sit in the queue.
+          if (turnUuid && resultIsForAnotherMessage(event, turnUuid)) continue;
           result = event;
           break;
         } else if (event.type === "rate_limit_event") {
@@ -985,6 +1007,8 @@ class ClaudeProcess {
         message = assistants.at(-1);
       }
 
+      // Native error assistants are not collected; report their text instead of "Incomplete".
+      if (!message && nativeError) throw new Error(`Claude Code API error: ${nativeError}`);
       if (!message || !sawMessageStop || !result) {
         throw new Error(
           `Incomplete Claude Code response: assistant, message_stop and one result required${this.stderr ? ` (${this.stderr.trim().slice(-500)})` : ""}`,
@@ -1184,6 +1208,11 @@ export async function runClaudeRequest(input: RunClaudeInput): Promise<RunClaude
     return output;
   } catch (error) {
     await discardProcess(acquired);
+    // A warm process can hold stale hidden state. If it failed before streaming
+    // or reaching the API, nothing was shown or charged, so replay once on a fresh process.
+    if (acquired.continuation && !acquired.worker.startedOutput && !input.signal?.aborted) {
+      return runClaudeRequest(input);
+    }
     throw error;
   }
 }
