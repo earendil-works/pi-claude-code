@@ -773,7 +773,10 @@ class ClaudeProcess {
       const env = { ...plan.env, ANTHROPIC_BASE_URL: await relay.start() };
       const mcp = {
         mcpServers: {
-          pi: { command: process.execPath, args: [inertMcpPath, toolsPath] },
+          // Standalone Pi is a Bun-compiled binary, so process.execPath is `pi`
+          // itself rather than a JS runtime. BUN_BE_BUN makes it run the script
+          // as Bun; Node ignores it.
+          pi: { command: process.execPath, args: [inertMcpPath, toolsPath], env: { BUN_BE_BUN: "1" } },
         },
       };
       const args = [
