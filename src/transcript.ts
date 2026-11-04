@@ -370,7 +370,7 @@ export function buildExtraBody(
   if (options?.maxTokens !== undefined) body.max_tokens = options.maxTokens;
 
   if (options?.reasoning) {
-    if (supportsAdaptiveThinking(modelId)) body.thinking = { type: "adaptive" };
+    if (supportsAdaptiveThinking(modelId)) body.thinking = { type: "adaptive", display: "summarized" };
     body.output_config = {
       effort: options.reasoning === "minimal" ? "low" : options.reasoning,
     };

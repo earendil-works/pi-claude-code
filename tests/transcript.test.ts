@@ -210,7 +210,7 @@ test("normalizes tool schemas and builds native generation fields", () => {
   );
   assert.deepEqual(buildExtraBody("claude-sonnet-5", prepared.nativeTools, { reasoning: "minimal" }), {
     tools: prepared.nativeTools,
-    thinking: { type: "adaptive" },
+    thinking: { type: "adaptive", display: "summarized" },
     output_config: { effort: "low" },
   });
   assert.deepEqual(buildExtraBody("claude-haiku-4-5-20251001", [], {}), {
