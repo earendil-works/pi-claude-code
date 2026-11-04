@@ -547,6 +547,12 @@ function setCacheBreakpoint(message: NativeRequestMessage): void {
   if (!Array.isArray(message.content) || message.content.length === 0) return;
   const last = message.content.at(-1);
   if (!last || typeof last !== "object") return;
+  // One breakpoint per message: Claude Code may already have marked an earlier
+  // block (e.g. a trailing date-reminder system message), and a second marker
+  // here would exceed Anthropic's four-breakpoint limit.
+  for (const block of message.content) {
+    if (block && typeof block === "object") delete (block as Record<string, unknown>).cache_control;
+  }
   (last as Record<string, unknown>).cache_control = { type: "ephemeral", ttl: "1h" };
 }
 

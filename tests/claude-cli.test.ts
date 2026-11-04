@@ -143,6 +143,55 @@ test("injects native system history at assistant boundaries", () => {
   );
 });
 
+test("keeps one breakpoint in a pre-marked multi-block final message (issue #10)", () => {
+  // Shape Claude Code sends for Fable after a tool result: a trailing system
+  // message whose first block is already marked.
+  const marker = { type: "ephemeral", ttl: "1h" };
+  const body = {
+    system: [
+      { type: "text", text: "billing" },
+      { type: "text", text: "identity", cache_control: marker },
+      { type: "text", text: "prompt", cache_control: marker },
+    ],
+    tools: [{ name: "mcp__pi__bash", input_schema: { type: "object" }, cache_control: marker }],
+    messages: [
+      { role: "user", content: [{ type: "text", text: "run it" }] },
+      { role: "system", content: "environment" },
+      { role: "assistant", content: [{ type: "tool_use", id: "t1", name: "mcp__pi__bash", input: {} }] },
+      { role: "user", content: [{ type: "tool_result", tool_use_id: "t1", content: "hi" }] },
+      {
+        role: "system",
+        content: [
+          { type: "text", text: "date reminder", cache_control: marker },
+          { type: "text", text: "parallel tool nudge" },
+        ],
+      },
+    ],
+  };
+  const rewritten = JSON.parse(
+    rewriteInitialRequest(
+      Buffer.from(JSON.stringify(body)),
+      undefined,
+      body.messages[0]!.content as unknown[],
+      [{ role: "system", content: [{ type: "text", text: "environment", cache_control: marker }] }],
+      [],
+    ).toString("utf8"),
+  );
+  const count = (value: unknown): number =>
+    Array.isArray(value)
+      ? value.reduce((sum: number, child) => sum + count(child), 0)
+      : value && typeof value === "object"
+        ? Object.entries(value).reduce(
+            (sum: number, [key, child]) => sum + (key === "cache_control" ? 1 : count(child)),
+            0,
+          )
+        : 0;
+  assert.ok(count(rewritten) <= 4, `found ${count(rewritten)} cache_control markers`);
+  const final = rewritten.messages.at(-1).content as Array<Record<string, unknown>>;
+  assert.equal(final[0]?.cache_control, undefined);
+  assert.deepEqual(final.at(-1)?.cache_control, marker);
+});
+
 const userFrame = (text: string) => ({
   type: "user" as const,
   message: { role: "user" as const, content: [{ type: "text", text }] },
