@@ -68,6 +68,14 @@ These environment variables are optional:
   (default: `claude`).
 - `PI_CLAUDE_CODE_CONFIG_DIR`: Claude Code config directory to use. The
   extension passes it to Claude Code as `CLAUDE_CONFIG_DIR`.
+- `PI_CLAUDE_CODE_INHERIT_SETTINGS_AUTH`: when set to a truthy value, pass
+  `env.ANTHROPIC_AUTH_TOKEN` or `env.ANTHROPIC_API_KEY` from Claude Code's own
+  `settings.json` / `settings.local.json` to the Claude Code process. The
+  extension runs Claude Code with its settings disabled so user hooks and
+  skills never change Pi turns, and that also hides logins stored in those
+  files (for example a `claude setup-token` value). Enable this only when the
+  token is your Claude subscription token; a token already present in Pi's
+  environment is still rejected so billing cannot change silently.
 
 ## Usage and billing
 
@@ -82,6 +90,10 @@ Foundry override for Claude Code.
 ## Limitations
 
 - The extension is experimental.
+- Logins stored in Claude Code's `settings.json` are invisible to the extension
+  unless `PI_CLAUDE_CODE_INHERIT_SETTINGS_AUTH` is set, because turns run with
+  Claude Code's settings disabled. A login created by `claude auth login` works
+  without that flag.
 - Branching, editing earlier messages, or changing settings mid-conversation
   starts a fresh Claude Code process that replays the conversation. The first
   response after that can be slower and may use more quota.
