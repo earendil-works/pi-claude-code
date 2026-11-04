@@ -9,6 +9,7 @@ import {
   cachedClaudeProcessCount,
   closeClaudeProcesses,
   discoverClaudeModels,
+  getClaudeStatus,
   rewriteInitialRequest,
   runClaudeRequest,
 } from "../src/claude-cli.ts";
@@ -142,7 +143,33 @@ test("injects native system history at assistant boundaries", () => {
   );
 });
 
-test("runs a request through a stream-json Claude executable", async () => {
+for (const key of [
+  "ANTHROPIC_AUTH_TOKEN",
+  "ANTHROPIC_BASE_URL",
+  "ANTHROPIC_FOUNDRY_API_KEY",
+  "CLAUDE_CODE_USE_BEDROCK",
+  "CLAUDE_CODE_USE_VERTEX",
+  "CLAUDE_CODE_USE_FOUNDRY",
+]) {
+  test(`rejects ${key} for model discovery and requests`, async () => {
+    const env = { [key]: "1", ANTHROPIC_API_KEY: "pi-test-dummy" };
+    const error = new RegExp(`refuses conflicting auth/backend overrides:.*${key}`);
+    await assert.rejects(discoverClaudeModels(env), error);
+    await assert.rejects(
+      runClaudeRequest({
+        model: "sonnet",
+        frames: [],
+        systemPrompt: "",
+        manifest: [],
+        extraBody: {},
+        env,
+      }),
+      error,
+    );
+  });
+}
+
+test("runs a request through a stream-json Claude executable with an inherited API key", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-claude-code-test-"));
   const workingRoot = await realpath(root);
   const executable = join(root, "fake-claude.mjs");
@@ -151,6 +178,7 @@ test("runs a request through a stream-json Claude executable", async () => {
     `#!/usr/bin/env node
 import readline from "node:readline";
 import {appendFileSync, readFileSync} from "node:fs";
+if ("ANTHROPIC_API_KEY" in process.env) throw new Error("API key leaked to Claude child");
 if (process.argv.includes("auth") && process.argv.includes("status")) {
   console.log(JSON.stringify({loggedIn: true, authMethod: "claude.ai", subscriptionType: "test"}));
   process.exit(0);
@@ -217,7 +245,9 @@ for await (const line of input) {
   await chmod(executable, 0o755);
 
   const events: string[] = [];
+  const originalApiKey = process.env.ANTHROPIC_API_KEY;
   try {
+    process.env.ANTHROPIC_API_KEY = "pi-test-dummy";
     const provider = createClaudeCodeProvider();
     const authCheck = await provider.auth.apiKey?.check?.({
       ctx: {
@@ -237,12 +267,20 @@ for await (const line of input) {
       /claude auth login/,
     );
 
-    const discovered = await discoverClaudeModels(
+    const explicitEnv = Object.freeze({
+      PATH: process.env.PATH,
+      PI_CLAUDE_CODE_COMMAND: executable,
+      EXPECTED_CWD: process.cwd(),
+      ANTHROPIC_API_KEY: "pi-test-explicit-dummy",
+    });
+    assert.equal((await getClaudeStatus(explicitEnv)).subscription, true);
+    for (const env of [
       { PI_CLAUDE_CODE_COMMAND: executable, EXPECTED_CWD: process.cwd() },
-      undefined,
-      5_000,
-    );
-    assert.deepEqual(discovered.map((model) => model.value), ["default", "sonnet"]);
+      explicitEnv,
+    ]) {
+      const discovered = await discoverClaudeModels(env, undefined, 5_000);
+      assert.deepEqual(discovered.map((model) => model.value), ["default", "sonnet"]);
+    }
 
     const result = await runClaudeRequest({
       model: "sonnet",
@@ -281,6 +319,7 @@ for await (const line of input) {
         EXPECTED_CWD: workingRoot,
         EXPECTED_SYSTEM_PROMPT: "system",
         PROCESS_LOG: processLog,
+        ANTHROPIC_API_KEY: explicitEnv.ANTHROPIC_API_KEY,
       },
       timeoutMs: 5_000,
     };
@@ -378,7 +417,12 @@ for await (const line of input) {
     });
     assert.equal(afterTool.message.id, "m_fake");
     assert.equal((await readFile(processLog, "utf8")).trim().split("\n").length, 6);
+    assert.equal(explicitEnv.ANTHROPIC_API_KEY === "pi-test-explicit-dummy", true);
+    assert.equal(common.env.ANTHROPIC_API_KEY === "pi-test-explicit-dummy", true);
+    assert.equal(process.env.ANTHROPIC_API_KEY === "pi-test-dummy", true);
   } finally {
+    if (originalApiKey === undefined) delete process.env.ANTHROPIC_API_KEY;
+    else process.env.ANTHROPIC_API_KEY = originalApiKey;
     await closeClaudeProcesses();
     await rm(root, { recursive: true, force: true });
   }

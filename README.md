@@ -75,9 +75,10 @@ Requests made through this extension count against your Claude subscription's
 usage quota and rate limits, the same as any other Claude Code usage. The
 extension does not give you separate or unlimited usage.
 
-To avoid silently changing how you're authenticated or billed, the extension
-refuses to run if your environment sets an API key, proxy, Bedrock, Vertex, or
-Foundry override for Claude Code.
+The extension ignores `ANTHROPIC_API_KEY` in Claude Code child processes without
+changing your environment. To avoid silently changing how you're authenticated
+or billed, it still rejects auth-token, proxy, Bedrock, Vertex, or Foundry
+overrides for Claude Code.
 
 ## Limitations
 

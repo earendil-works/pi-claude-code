@@ -114,9 +114,10 @@ export async function resolveClaudeExecutable(
   return undefined;
 }
 
-function withConfigDirectory(env: Record<string, string | undefined>): Record<string, string> {
+function claudeEnvironment(env: Record<string, string | undefined>): Record<string, string> {
   const output: Record<string, string> = {};
   for (const [key, value] of Object.entries(env)) if (value !== undefined) output[key] = value;
+  delete output.ANTHROPIC_API_KEY;
   if (output.PI_CLAUDE_CODE_CONFIG_DIR) output.CLAUDE_CONFIG_DIR = output.PI_CLAUDE_CODE_CONFIG_DIR;
   return output;
 }
@@ -154,7 +155,7 @@ export async function getClaudeStatus(
   envInput: Record<string, string | undefined> = process.env,
   signal?: AbortSignal,
 ): Promise<ClaudeStatus> {
-  const env = withConfigDirectory(envInput);
+  const env = claudeEnvironment(envInput);
   const command = await resolveClaudeExecutable(env);
   if (!command) return { available: false, loggedIn: false, subscription: false, detail: INSTALL_HINT };
   try {
@@ -191,7 +192,7 @@ async function readyClaudeCommand(
   envInput: Record<string, string | undefined>,
   signal?: AbortSignal,
 ): Promise<string> {
-  const env = withConfigDirectory(envInput);
+  const env = claudeEnvironment(envInput);
   const key = JSON.stringify([configuredCommand(env), env.PATH, env.HOME, env.CLAUDE_CONFIG_DIR]);
   const cached = readyStatusCache.get(key);
   if (cached && cached.expires > Date.now()) return cached.command;
@@ -410,7 +411,7 @@ class AsyncQueue<T> {
 }
 
 function conflictingEnvironment(env: Record<string, string>): string[] {
-  const conflicts = ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "ANTHROPIC_FOUNDRY_API_KEY"].filter(
+  const conflicts = ["ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "ANTHROPIC_FOUNDRY_API_KEY"].filter(
     (key) => !!env[key],
   );
   for (const key of ["CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY"]) {
@@ -423,7 +424,7 @@ function processEnvironment(
   input: Record<string, string | undefined> | undefined,
   extraBody: Record<string, unknown>,
 ): Record<string, string> {
-  const env = withConfigDirectory({ ...process.env, ...input });
+  const env = claudeEnvironment({ ...process.env, ...input });
   const conflicts = conflictingEnvironment(env);
   if (conflicts.length) {
     throw new Error(`Claude Code subscription provider refuses conflicting auth/backend overrides: ${conflicts.join(", ")}`);
