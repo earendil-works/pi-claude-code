@@ -30,8 +30,10 @@ as a subscription. The provider also declares an `oauth` method, marked
 `isSubscription`, only so Pi's subscription-aware UI works. Its `login()` never
 starts a flow; it tells the user to run `claude auth login`.
 
-Inherited API-key, proxy, Bedrock, Vertex, and Foundry overrides are rejected
-to avoid silently changing authentication or billing.
+Claude Code child processes do not inherit `ANTHROPIC_API_KEY`. The parent
+environment is unchanged. Inherited auth-token, proxy, Bedrock, Vertex, and
+Foundry overrides are still rejected to avoid silently changing authentication
+or billing.
 
 ## Usage-credit guard
 
