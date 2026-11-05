@@ -145,6 +145,13 @@ test("reports a failed status process as a diagnostic, not as a logout", { skip 
   assert.match(crashStatus.detail ?? "", /boom/u);
   assert.notEqual(crashStatus.detail, LOGIN_HINT);
 
+  // PowerShell must forward the script's exit code instead of collapsing it to 1.
+  const crashingPs1 = join(root, "crashing.ps1");
+  await writeFile(crashingPs1, `[Console]::Error.WriteLine('boom')\r\nexit 3\r\n`, "utf8");
+  const ps1Status = await getClaudeStatus({ ...env, PI_CLAUDE_CODE_COMMAND: crashingPs1 });
+  assert.equal(ps1Status.diagnostic, true);
+  assert.match(ps1Status.detail ?? "", /exit 3/u);
+
   const garbage = join(root, "garbage.cmd");
   await writeFile(garbage, `@ECHO off\r\necho not-json-at-all\r\n`, "utf8");
   const garbageStatus = await getClaudeStatus({ ...env, PI_CLAUDE_CODE_COMMAND: garbage });

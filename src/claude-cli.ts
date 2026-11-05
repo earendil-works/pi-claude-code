@@ -447,7 +447,13 @@ function spawnPowerShellScript(
   options: Parameters<typeof spawn>[2],
 ): ChildProcess {
   const shell = resolvePowerShell(options?.env ?? process.env);
-  const script = [`& ${powershellLiteral(command)}`, ...args.map(powershellLiteral)].join(" ");
+  // `-Command` collapses a script's exit code to 0 or 1, so forward it explicitly.
+  const script = [
+    [`& ${powershellLiteral(command)}`, ...args.map(powershellLiteral)].join(" "),
+    "$ok = $?",
+    "if ($LASTEXITCODE) { exit $LASTEXITCODE }",
+    "if (-not $ok) { exit 1 }",
+  ].join("; ");
   const encoded = Buffer.from(script, "utf16le").toString("base64");
   return spawn(
     shell,
