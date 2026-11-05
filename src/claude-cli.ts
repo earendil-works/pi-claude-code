@@ -56,8 +56,6 @@ export interface RunClaudeInput {
   timeoutMs?: number;
   env?: Record<string, string | undefined>;
   upstreamUrl?: string;
-  /** Native blocks Claude Code injected ahead of the first canonical user message. */
-  initialUserPrefix?: unknown[];
   /** Native system messages Claude Code injected immediately after that user message. */
   initialSystemMessages?: unknown[];
   /** Pi system/tool deltas to restore at their historical assistant boundaries. */
@@ -79,7 +77,6 @@ export interface RunClaudeOutput {
     blockedRequests: number;
     requestId?: string;
   };
-  initialUserPrefix?: unknown[];
   initialSystemMessages?: unknown[];
   /** Latest plan-limit status Claude Code reported for this turn. */
   rateLimit?: RateLimitInfo;
@@ -591,6 +588,10 @@ function processEnvironment(
     DISABLE_FEEDBACK_COMMAND: "1",
     CLAUDE_CODE_DISABLE_OFFICIAL_MARKETPLACE_AUTOINSTALL: "1",
     CLAUDE_CODE_DISABLE_FILE_MENTIONS: "1",
+    // Claude Code would add these as reminders to user messages and tool
+    // results. The relay also strips anything else it adds there.
+    CLAUDE_CODE_DISABLE_AUTO_MEMORY: "1",
+    CLAUDE_CODE_DISABLE_CLAUDE_MDS: "1",
     CLAUDE_CODE_MAX_RETRIES: "0",
     DISABLE_AUTO_COMPACT: "1",
     DISABLE_COMPACT: "1",
@@ -661,17 +662,6 @@ function requestMessages(body: Buffer | undefined): NativeRequestMessage[] | und
   }
 }
 
-function deriveInitialUserPrefix(body: Buffer | undefined, canonicalContent: unknown[]): unknown[] | undefined {
-  if (canonicalContent.length === 0) return undefined;
-  const actual = requestMessages(body)?.[0];
-  if (actual?.role !== "user" || !Array.isArray(actual.content) || actual.content.length < canonicalContent.length) {
-    return undefined;
-  }
-  const suffix = actual.content.slice(-canonicalContent.length).map(withoutCacheControl);
-  if (JSON.stringify(suffix) !== JSON.stringify(canonicalContent.map(withoutCacheControl))) return undefined;
-  return structuredClone(actual.content.slice(0, -canonicalContent.length));
-}
-
 function deriveInitialSystemMessages(body: Buffer | undefined): unknown[] | undefined {
   const messages = requestMessages(body);
   if (messages?.[0]?.role !== "user") return undefined;
@@ -737,33 +727,82 @@ function setReplayCacheBreakpoints(messages: NativeRequestMessage[]): void {
   if (final) setCacheBreakpoint(final);
 }
 
-function removeRepeatedUserReminders(messages: NativeRequestMessage[], prefix: unknown[] | undefined): void {
-  const reminder = contentText(prefix).trimEnd();
-  if (!reminder || !prefix) return;
-  const normalizedPrefix = JSON.stringify(prefix.map(withoutCacheControl));
+type ContentBlock = Record<string, unknown>;
 
-  for (let index = 1; index < messages.length; index++) {
-    const message = messages[index];
-    if (message?.role !== "user" || !Array.isArray(message.content)) continue;
-    const leading = message.content.slice(0, prefix.length).map(withoutCacheControl);
-    if (JSON.stringify(leading) === normalizedPrefix) message.content.splice(0, prefix.length);
+function isBlock(value: unknown): value is ContentBlock {
+  return !!value && typeof value === "object" && !Array.isArray(value);
+}
 
-    const toolResult = message.content.findLast(
-      (block) => block && typeof block === "object" && (block as Record<string, unknown>).type === "tool_result",
-    ) as Record<string, unknown> | undefined;
-    if (!toolResult) continue;
+/** Claude Code's note after an image it downscaled, mapping coordinates to the original. */
+function isImageScaleNote(block: unknown): boolean {
+  return (
+    isBlock(block) &&
+    block.type === "text" &&
+    typeof block.text === "string" &&
+    /^\[Image: original \d+x\d+/u.test(block.text)
+  );
+}
 
-    const suffix = `\n${reminder}`;
-    if (typeof toolResult.content === "string" && toolResult.content.endsWith(suffix)) {
-      toolResult.content = toolResult.content.slice(0, -suffix.length);
-    } else if (Array.isArray(toolResult.content)) {
-      const final = toolResult.content.at(-1) as Record<string, unknown> | undefined;
-      if (final?.type === "text" && typeof final.text === "string") {
-        if (final.text === reminder) toolResult.content.pop();
-        else if (final.text.endsWith(suffix)) final.text = final.text.slice(0, -suffix.length);
-      }
+/**
+ * Rebuild native user content from Pi's canonical blocks. Claude Code adds
+ * reminders (auto-memory, account context, attachments) to user messages and
+ * appends them to tool-result text; none of that is Pi history. Canonical
+ * blocks are matched in order to Claude Code's blocks by type, and anything
+ * Claude Code added is dropped. Images are the exception: Claude Code may
+ * downscale them and add a coordinate note, so its copies are kept.
+ */
+function alignCanonicalContent(canonical: unknown[], wire: unknown[], where: string): unknown[] {
+  const output: unknown[] = [];
+  let cursor = 0;
+  for (const block of canonical) {
+    if (!isBlock(block)) throw new Error(`Claude Code request has an invalid canonical block in ${where}`);
+    const index = wire.findIndex(
+      (candidate, position) =>
+        position >= cursor &&
+        isBlock(candidate) &&
+        candidate.type === block.type &&
+        (block.type !== "tool_result" || candidate.tool_use_id === block.tool_use_id),
+    );
+    if (index < 0) throw new Error(`Claude Code request lost a ${String(block.type)} block in ${where}`);
+    const native = wire[index] as ContentBlock;
+    cursor = index + 1;
+
+    if (block.type === "image") {
+      output.push(withoutCacheControl(native));
+      if (isImageScaleNote(wire[cursor])) output.push(withoutCacheControl(wire[cursor++]));
+    } else if (block.type === "tool_result" && Array.isArray(block.content) && Array.isArray(native.content)) {
+      output.push({ ...structuredClone(block), content: alignCanonicalContent(block.content, native.content, where) });
+    } else {
+      output.push(structuredClone(block));
     }
   }
+  return output;
+}
+
+/** Replace every native user message's content with Pi's canonical content for it. */
+function restoreCanonicalUserContent(messages: NativeRequestMessage[], frames: NativeFrame[]): void {
+  const canonical = frames.filter((frame) => frame.type === "user");
+  const native = messages.filter((message) => message.role === "user");
+  if (native.length !== canonical.length) {
+    throw new Error(
+      `Claude Code request has ${native.length} user messages where Pi's history has ${canonical.length}`,
+    );
+  }
+  native.forEach((message, index) => {
+    const wire = Array.isArray(message.content)
+      ? message.content
+      : typeof message.content === "string"
+        ? [{ type: "text", text: message.content }]
+        : [];
+    // Keep Claude Code's breakpoint on this message even if it marked a dropped block.
+    const marker = (wire.findLast((block) => isBlock(block) && block.cache_control) as ContentBlock | undefined)
+      ?.cache_control;
+    const content = alignCanonicalContent(canonical[index]!.message.content, wire, `user message ${index}`);
+    if (marker && content.length) {
+      content[content.length - 1] = { ...(content.at(-1) as ContentBlock), cache_control: structuredClone(marker) };
+    }
+    message.content = content;
+  });
 }
 
 function injectNativeSystemMessages(
@@ -810,8 +849,7 @@ function normalizeLeadingSystemCache(system: unknown): void {
 
 export function rewriteInitialRequest(
   body: Buffer,
-  prefix: unknown[] | undefined,
-  canonicalContent: unknown[],
+  frames: NativeFrame[],
   initialSystemMessages: unknown[] | undefined,
   nativeSystemInjections?: NativeSystemInjection[],
 ): Buffer {
@@ -824,7 +862,7 @@ export function rewriteInitialRequest(
   if (first?.role !== "user" || !Array.isArray(first.content)) {
     throw new Error("Claude Code request is missing its initial user message");
   }
-  if (prefix) first.content = [...structuredClone(prefix), ...structuredClone(canonicalContent)];
+  if (messages) restoreCanonicalUserContent(messages, frames);
 
   if (initialSystemMessages?.length && messages) {
     let systemEnd = 1;
@@ -839,7 +877,6 @@ export function rewriteInitialRequest(
       if (!trailingText || !initialText.includes(trailingText)) break;
       messages.pop();
     }
-    removeRepeatedUserReminders(messages, prefix);
   }
 
   if (nativeSystemInjections) {
@@ -1087,19 +1124,9 @@ class ClaudeProcess {
       if (event.type === "message_stop") sawMessageStop = true;
       input.onEvent?.(event);
     };
-    const canonicalInitialUser = input.frames.find((frame) => frame.type === "user")?.message.content ?? [];
     this.relay.beginTurn(
       deliver,
-      input.initialUserPrefix || input.initialSystemMessages || input.nativeSystemInjections
-        ? (body) =>
-            rewriteInitialRequest(
-              body,
-              input.initialUserPrefix,
-              canonicalInitialUser,
-              input.initialSystemMessages,
-              input.nativeSystemInjections,
-            )
-        : undefined,
+      (body) => rewriteInitialRequest(body, input.frames, input.initialSystemMessages, input.nativeSystemInjections),
       input.betas,
     );
 
@@ -1222,8 +1249,6 @@ class ClaudeProcess {
           blockedRequests: this.relay.denied,
           requestId: this.relay.requestId,
         },
-        initialUserPrefix:
-          input.initialUserPrefix ?? deriveInitialUserPrefix(this.relay.originalRequestBody, canonicalInitialUser),
         initialSystemMessages:
           input.initialSystemMessages ?? deriveInitialSystemMessages(this.relay.originalRequestBody),
         rateLimit,

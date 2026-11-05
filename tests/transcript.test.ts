@@ -4,7 +4,6 @@ import type { AssistantMessage, Message, Model, Tool } from "@earendil-works/pi-
 import {
   buildExtraBody,
   getInitialSystemMessages,
-  getInitialUserPrefix,
   makeReplayDiagnostic,
   normalizeInputSchema,
   prepareFrames,
@@ -93,11 +92,9 @@ test("replays native signed blocks only while the visible projection is unchange
     ],
     stop_reason: "end_turn",
   };
-  const nativePrefix = [{ type: "text", text: "<system-reminder>stable</system-reminder>" }];
   const nativeSystems = [{ role: "system", content: [{ type: "text", text: "environment" }] }];
-  assistant.diagnostics = [makeReplayDiagnostic(native, assistant, nativePrefix, nativeSystems) as never];
+  assistant.diagnostics = [makeReplayDiagnostic(native, assistant, nativeSystems) as never];
 
-  assert.deepEqual(getInitialUserPrefix([assistant]), nativePrefix);
   assert.deepEqual(getInitialSystemMessages([assistant]), nativeSystems);
   const original = prepareFrames([
     { role: "user", content: "go", timestamp: 0 },

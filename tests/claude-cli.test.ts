@@ -13,11 +13,41 @@ import {
   rewriteInitialRequest,
   runClaudeRequest,
 } from "../src/claude-cli.ts";
+import type { NativeFrame } from "../src/native-types.ts";
 import { createClaudeCodeProvider } from "../src/provider.ts";
 
+type Block = Record<string, unknown>;
+type WireMessage = { role: string; content: unknown };
+
+const text = (value: string): Block => ({ type: "text", text: value });
+const memory = "<system-reminder>[MEMORY.md contents]</system-reminder>";
+const account = "<system-reminder># userEmail\nuser@example.com</system-reminder>";
+
+/** Canonical frames for the non-system messages of a wire request without reminders. */
+function framesFor(messages: WireMessage[]): NativeFrame[] {
+  return messages
+    .filter((message) => message.role !== "system")
+    .map((message) => ({
+      type: message.role as "user" | "assistant",
+      message: { role: message.role as "user" | "assistant", content: structuredClone(message.content) as unknown[] },
+    }));
+}
+
+function rewrite(
+  wire: WireMessage[],
+  frames: NativeFrame[],
+  initialSystemMessages?: unknown[],
+  injections?: Parameters<typeof rewriteInitialRequest>[3],
+): WireMessage[] {
+  const body = Buffer.from(JSON.stringify({ messages: wire }));
+  return (JSON.parse(rewriteInitialRequest(body, frames, initialSystemMessages, injections).toString("utf8")) as {
+    messages: WireMessage[];
+  }).messages;
+}
+
+const withoutMarkers = (value: unknown): unknown => JSON.parse(JSON.stringify(value, (key, child) => (key === "cache_control" ? undefined : child)));
+
 test("stabilizes Claude Code's native replay reminders and cache breakpoint", () => {
-  const canonical = [{ type: "text", text: "inspect" }];
-  const prefix = [{ type: "text", text: "account reminder" }];
   const initialSystemMessages = [
     {
       role: "system",
@@ -30,61 +60,169 @@ test("stabilizes Claude Code's native replay reminders and cache breakpoint", ()
       ],
     },
   ];
-  const current = {
-    messages: [
-      { role: "user", content: [{ type: "text", text: "changed reminder" }, ...canonical] },
-      { role: "system", content: "environment reminder" },
-      { role: "assistant", content: [{ type: "text", text: "first reply" }] },
-      { role: "user", content: [...prefix, { type: "text", text: "follow up" }] },
+  const canonical = [
+    { role: "user", content: [text("inspect")] },
+    { role: "assistant", content: [text("first reply")] },
+    { role: "user", content: [text("follow up")] },
+    { role: "assistant", content: [{ type: "tool_use", id: "t1", name: "read", input: {} }] },
+    { role: "user", content: [{ type: "tool_result", tool_use_id: "t1", content: "old result" }] },
+    { role: "assistant", content: [{ type: "tool_use", id: "t2", name: "read", input: {} }] },
+    { role: "user", content: [{ type: "tool_result", tool_use_id: "t2", content: "current result" }] },
+  ];
+  const current = [
+    { role: "user", content: [text("changed reminder"), text("inspect")] },
+    { role: "system", content: "environment reminder" },
+    { role: "assistant", content: [text("first reply")] },
+    { role: "user", content: [text(account), text("follow up")] },
+    { role: "assistant", content: [{ type: "tool_use", id: "t1", name: "read", input: {} }] },
+    { role: "user", content: [{ type: "tool_result", tool_use_id: "t1", content: "old result" }] },
+    { role: "assistant", content: [{ type: "tool_use", id: "t2", name: "read", input: {} }] },
+    { role: "user", content: [{ type: "tool_result", tool_use_id: "t2", content: `current result\n${account}` }] },
+    {
+      role: "system",
+      content: [{ type: "text", text: "date reminder", cache_control: { type: "ephemeral", ttl: "1h" } }],
+    },
+  ];
+
+  const rewritten = rewrite(current, framesFor(canonical), initialSystemMessages);
+  assert.equal(rewritten.length, 8);
+  assert.equal(((rewritten[1]?.content as Block[])[0]?.text as string), "environment reminder\ndate reminder");
+  assert.equal((rewritten[1]?.content as Block[])[0]?.cache_control, undefined);
+  assert.deepEqual(
+    withoutMarkers(rewritten.filter((message) => message.role !== "system")),
+    withoutMarkers(canonical),
+  );
+  assert.deepEqual((rewritten[5]?.content as Block[]).at(-1)?.cache_control, { type: "ephemeral", ttl: "1h" });
+  assert.deepEqual((rewritten.at(-1)?.content as Block[]).at(-1)?.cache_control, { type: "ephemeral", ttl: "1h" });
+});
+
+test("strips reminders when the first user message carries none (issue #27)", () => {
+  const canonical = [
+    { role: "user", content: [text("inspect")] },
+    { role: "assistant", content: [text("first reply")] },
+    { role: "user", content: [text("follow up")] },
+    { role: "assistant", content: [{ type: "tool_use", id: "t1", name: "read", input: {} }] },
+    { role: "user", content: [{ type: "tool_result", tool_use_id: "t1", content: "result" }] },
+  ];
+  const wire = [
+    { role: "user", content: [text("inspect")] },
+    { role: "assistant", content: [text("first reply")] },
+    { role: "user", content: [text(memory), text(account), text("follow up")] },
+    { role: "assistant", content: [{ type: "tool_use", id: "t1", name: "read", input: {} }] },
+    { role: "user", content: [{ type: "tool_result", tool_use_id: "t1", content: `result\n${memory}${account}` }] },
+  ];
+  // No captured system messages: stripping must not depend on them.
+  assert.deepEqual(rewrite(wire, framesFor(canonical)), canonical);
+  assert.deepEqual(
+    withoutMarkers(
+      rewrite(wire, framesFor(canonical), [{ role: "system", content: "environment reminder" }]).filter(
+        (message) => message.role !== "system",
+      ),
+    ),
+    canonical,
+  );
+});
+
+test("strips reminder tails from tool results whatever their separator or subset", () => {
+  const canonicalResult = { type: "tool_result", tool_use_id: "t1", content: "result" };
+  const frames = framesFor([
+    { role: "user", content: [text("inspect")] },
+    { role: "assistant", content: [{ type: "tool_use", id: "t1", name: "read", input: {} }] },
+    { role: "user", content: [canonicalResult] },
+  ]);
+  for (const tail of [
+    `\n${memory}\n${account}`,
+    `\n\n${memory}\n\n${account}`,
+    `\n\n${account}`,
+    `\n${account}`,
+    account,
+  ]) {
+    const rewritten = rewrite(
+      [
+        { role: "user", content: [text("inspect")] },
+        { role: "assistant", content: [{ type: "tool_use", id: "t1", name: "read", input: {} }] },
+        { role: "user", content: [{ type: "tool_result", tool_use_id: "t1", content: `result${tail}` }] },
+      ],
+      frames,
+    );
+    assert.deepEqual((rewritten[2]?.content as Block[])[0]?.content, "result", JSON.stringify(tail));
+  }
+});
+
+test("strips reminder blocks from text-array tool results and keeps Claude Code's images", () => {
+  const image = { type: "image", source: { type: "base64", media_type: "image/png", data: "original" } };
+  const resized = { type: "image", source: { type: "base64", media_type: "image/png", data: "resized" } };
+  const note = text("[Image: original 4000x4000, displayed at 2000x2000. Multiply coordinates by 2.00 to map to original image.]");
+  const frames = framesFor([
+    { role: "user", content: [text("look"), image] },
+    { role: "assistant", content: [{ type: "tool_use", id: "t1", name: "read", input: {} }] },
+    { role: "user", content: [{ type: "tool_result", tool_use_id: "t1", content: [text("result"), image] }] },
+  ]);
+  const rewritten = rewrite(
+    [
+      { role: "user", content: [text(memory), text("look"), resized, note] },
       { role: "assistant", content: [{ type: "tool_use", id: "t1", name: "read", input: {} }] },
-      { role: "user", content: [{ type: "tool_result", tool_use_id: "t1", content: "old result" }] },
-      { role: "assistant", content: [{ type: "tool_use", id: "t2", name: "read", input: {} }] },
       {
         role: "user",
-        content: [{ type: "tool_result", tool_use_id: "t2", content: "current result\naccount reminder" }],
-      },
-      {
-        role: "system",
         content: [
-          {
-            type: "text",
-            text: "date reminder",
-            cache_control: { type: "ephemeral", ttl: "1h" },
-          },
+          { type: "tool_result", tool_use_id: "t1", content: [text("result"), image, text(`\n${account}`)] },
+          text(memory),
         ],
       },
     ],
-  };
+    frames,
+  );
+  assert.deepEqual(rewritten[0]?.content, [text("look"), resized, note]);
+  assert.deepEqual(rewritten[2]?.content, [
+    { type: "tool_result", tool_use_id: "t1", content: [text("result"), image] },
+  ]);
+});
 
-  const rewritten = JSON.parse(
-    rewriteInitialRequest(Buffer.from(JSON.stringify(current)), prefix, canonical, initialSystemMessages).toString("utf8"),
-  ) as typeof current;
-  assert.deepEqual(rewritten.messages[0]?.content, [...prefix, ...canonical]);
-  assert.equal(
-    ((rewritten.messages[1]?.content as Array<Record<string, unknown>>)[0]?.text as string),
-    "environment reminder\ndate reminder",
+test("keeps user-authored reminder-like text and ordinary output unchanged", () => {
+  const canonical = [
+    { role: "user", content: [text("<system-reminder>mine</system-reminder>"), text("inspect")] },
+    { role: "assistant", content: [{ type: "tool_use", id: "t1", name: "read", input: {} }] },
+    {
+      role: "user",
+      content: [
+        { type: "tool_result", tool_use_id: "t1", content: `file says\n${account}`, is_error: false },
+        text("<system-reminder>also mine</system-reminder>"),
+      ],
+    },
+  ];
+  const wire = structuredClone(canonical);
+  (wire[2]!.content as Block[])[0]!.content = `file says\n${account}\n${memory}`;
+  assert.deepEqual(rewrite(wire, framesFor(canonical)), canonical);
+  assert.deepEqual(rewrite(structuredClone(canonical), framesFor(canonical)), canonical);
+});
+
+test("moves a breakpoint on a dropped reminder to the canonical tail", () => {
+  const marker = { type: "ephemeral" };
+  const rewritten = rewrite(
+    [{ role: "user", content: [text("inspect"), { ...text(memory), cache_control: marker }] }],
+    framesFor([{ role: "user", content: [text("inspect")] }]),
   );
-  assert.equal(
-    ((rewritten.messages[1]?.content as Array<Record<string, unknown>>)[0]?.cache_control),
-    undefined,
-  );
-  assert.equal(rewritten.messages.length, 8);
-  assert.deepEqual(rewritten.messages[3]?.content, [{ type: "text", text: "follow up" }]);
-  assert.equal(
-    ((rewritten.messages[5]?.content as Array<Record<string, unknown>>)[0]?.content as string),
-    "old result",
-  );
-  assert.deepEqual(
-    (rewritten.messages[5]?.content as Array<Record<string, unknown>>).at(-1)?.cache_control,
-    { type: "ephemeral", ttl: "1h" },
-  );
-  assert.equal(
-    ((rewritten.messages[7]?.content as Array<Record<string, unknown>>)[0]?.content as string),
-    "current result",
-  );
-  assert.deepEqual(
-    (rewritten.messages.at(-1)?.content as Array<Record<string, unknown>>).at(-1)?.cache_control,
-    { type: "ephemeral", ttl: "1h" },
+  assert.deepEqual(rewritten[0]?.content, [{ ...text("inspect"), cache_control: marker }]);
+});
+
+test("refuses requests that do not line up with Pi's history", () => {
+  const frames = framesFor([
+    { role: "user", content: [text("inspect")] },
+    { role: "assistant", content: [{ type: "tool_use", id: "t1", name: "read", input: {} }] },
+    { role: "user", content: [{ type: "tool_result", tool_use_id: "t1", content: "result" }] },
+  ]);
+  assert.throws(() => rewrite([{ role: "user", content: [text("inspect")] }], frames), /1 user messages where Pi's history has 2/);
+  assert.throws(
+    () =>
+      rewrite(
+        [
+          { role: "user", content: [text("inspect")] },
+          { role: "assistant", content: [{ type: "tool_use", id: "t1", name: "read", input: {} }] },
+          { role: "user", content: [{ type: "tool_result", tool_use_id: "other", content: "result" }] },
+        ],
+        frames,
+      ),
+    /lost a tool_result block in user message 1/,
   );
 });
 
@@ -103,7 +241,7 @@ test("injects native system history at assistant boundaries", () => {
     ],
   };
   const rewritten = JSON.parse(
-    rewriteInitialRequest(Buffer.from(JSON.stringify(body)), undefined, body.messages[0]!.content, undefined, [
+    rewriteInitialRequest(Buffer.from(JSON.stringify(body)), framesFor(body.messages), undefined, [
       {
         beforeAssistant: 0,
         content: [{ type: "tool_addition", tool: { type: "tool_reference", name: "mcp__pi__beta" } }],
@@ -171,8 +309,7 @@ test("keeps one breakpoint in a pre-marked multi-block final message (issue #10)
   const rewritten = JSON.parse(
     rewriteInitialRequest(
       Buffer.from(JSON.stringify(body)),
-      undefined,
-      body.messages[0]!.content as unknown[],
+      framesFor(body.messages),
       [{ role: "system", content: [{ type: "text", text: "environment", cache_control: marker }] }],
       [],
     ).toString("utf8"),
@@ -575,7 +712,10 @@ for await (const line of input) {
   if (frame.type !== "user") continue;
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
-      const response = await fetch(\`\${process.env.ANTHROPIC_BASE_URL}/v1/messages\`, {method: "POST", body: "{}"});
+      const response = await fetch(\`\${process.env.ANTHROPIC_BASE_URL}/v1/messages\`, {
+        method: "POST",
+        body: JSON.stringify({messages: [frame.message]}),
+      });
       await response.text();
     } catch {}
   }
