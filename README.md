@@ -85,6 +85,29 @@ Both forms work as `PI_CLAUDE_CODE_COMMAND`:
   (PowerShell 7) because Windows PowerShell 5.1 cannot forward every quoted
   argument from a script to a native program.
 
+### Model discovery and privacy
+
+The extension asks Claude Code for the account's model catalog automatically.
+The discovery probe allows Claude Code's normal feature-flag and catalog traffic,
+including its usage telemetry, because disabling feature flags hides models such
+as Mythos and previous-generation models. This is a
+[known Claude Code issue](https://github.com/anthropics/claude-code/issues/105923).
+The probe sends no conversation history or generation request. Automatic CLI
+updates, official marketplace auto-install, feedback uploads, and error reporting
+remain disabled.
+
+To opt out of discovery telemetry, set `DISABLE_TELEMETRY=1` before starting Pi.
+Discovery also preserves inherited `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`,
+`DO_NOT_TRACK`, and `DISABLE_GROWTHBOOK` settings. These can reduce the discovered
+catalog; the extension does not remove them to restore missing models. Claude
+Code treats any non-empty `DISABLE_TELEMETRY` or
+`CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` value as enabled, including `0` or
+`false`; unset them to allow normal discovery again. See
+[Claude Code's environment variables](https://code.claude.com/docs/en/env-vars#features-that-need-feature-flag-fetching).
+
+Conversation workers still disable telemetry and nonessential traffic regardless
+of the discovery settings.
+
 ## Usage and billing
 
 Requests made through this extension count against your Claude subscription's
