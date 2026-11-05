@@ -21,9 +21,9 @@ const SAFETY_FLAGS = [
 
 test("model discovery allows the served catalog while preserving explicit privacy choices", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "pi-claude-code-discovery-"));
-  const executable = join(root, "fake-claude.mjs");
+  const script = join(root, "fake-claude.mjs");
   const environmentLog = join(root, "environment.json");
-  await writeFile(executable, `#!/usr/bin/env node
+  await writeFile(script, `#!/usr/bin/env node
 import assert from "node:assert/strict";
 import { writeFileSync } from "node:fs";
 import readline from "node:readline";
@@ -52,6 +52,11 @@ for await (const line of readline.createInterface({ input: process.stdin })) {
   }
 }
 `);
+  // Windows cannot execute a shebang script directly; go through a .cmd shim.
+  const executable = process.platform === "win32" ? join(root, "fake-claude.cmd") : script;
+  if (executable !== script) {
+    await writeFile(executable, `@ECHO off\r\n"${process.execPath}" "${script}" %*\r\n`, "utf8");
+  }
   await chmod(executable, 0o755);
   const baseEnv: Record<string, string | undefined> = {
     ...Object.fromEntries(PRIVACY_FLAGS.map((name) => [name, undefined])),
