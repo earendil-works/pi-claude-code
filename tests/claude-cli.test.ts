@@ -535,24 +535,32 @@ for await (const line of input) {
   }
 });
 
-test("reports a dropped upstream stream as a retryable error", async () => {
-  // Anthropic answers 200, starts streaming, then the connection drops.
-  const upstream = http.createServer(async (request, response) => {
-    for await (const _chunk of request);
-    response.writeHead(200, { "content-type": "text/event-stream" });
-    const usage = { input_tokens: 2, output_tokens: 0 };
-    response.write(
-      `event: message_start\ndata: ${JSON.stringify({ type: "message_start", message: { id: "m1", role: "assistant", content: [], usage } })}\n\n`,
-    );
-    setTimeout(() => response.socket?.destroy(), 20);
-  });
-  await new Promise<void>((resolve) => upstream.listen(0, "127.0.0.1", resolve));
-  const address = upstream.address();
-  if (!address || typeof address === "string") throw new Error("missing address");
+/**
+ * Run one turn through a fake Claude Code that, like the real one, reads the
+ * relayed response and retries once natively. `upstream` answers the relayed
+ * request; without it the relay points at a closed port.
+ */
+async function failingUpstreamTurn(
+  upstream?: (request: http.IncomingMessage, response: http.ServerResponse) => void,
+): Promise<{ message: string; retryable: boolean }> {
+  let server: http.Server | undefined;
+  let port: number;
+  if (upstream) {
+    server = http.createServer(upstream);
+    await new Promise<void>((resolve) => server!.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("missing address");
+    port = address.port;
+  } else {
+    // Reserve a port, then close it so connecting is refused.
+    const probe = http.createServer();
+    await new Promise<void>((resolve) => probe.listen(0, "127.0.0.1", resolve));
+    port = (probe.address() as { port: number }).port;
+    await new Promise<void>((resolve) => probe.close(() => resolve()));
+  }
 
-  const root = await realpath(await mkdtemp(join(tmpdir(), "pi-claude-code-drop-")));
+  const root = await realpath(await mkdtemp(join(tmpdir(), "pi-claude-code-upstream-")));
   const executable = join(root, "fake-claude.mjs");
-  // Like Claude Code: read the stream, then retry once natively before giving up.
   await writeFile(
     executable,
     `#!/usr/bin/env node
@@ -587,19 +595,69 @@ for await (const line of input) {
       manifest: [],
       extraBody: { tools: [] },
       env: { PI_CLAUDE_CODE_COMMAND: executable },
-      upstreamUrl: `http://127.0.0.1:${address.port}`,
+      upstreamUrl: `http://127.0.0.1:${port}`,
       timeoutMs: 5_000,
     }).then(
-      () => assert.fail("expected the dropped stream to fail"),
+      () => assert.fail("expected the upstream failure to fail the turn"),
       (error: Error) => error,
     );
-    assert.match(error.message, /status 200, capture incomplete/);
-    assert.match(error.message, /native retries denied 1/);
     const failed = { role: "assistant", stopReason: "error", errorMessage: error.message } as AssistantMessage;
-    assert.equal(isRetryableAssistantError(failed), true);
+    return { message: error.message, retryable: isRetryableAssistantError(failed) };
   } finally {
     closeClaudeProcesses();
-    await new Promise<void>((resolve) => upstream.close(() => resolve()));
+    if (server) await new Promise<void>((resolve) => server!.close(() => resolve()));
     await rm(root, { recursive: true, force: true });
   }
+}
+
+test("reports a dropped upstream stream as a retryable error", async () => {
+  // Anthropic answers 200, starts streaming, then the connection drops.
+  const { message, retryable } = await failingUpstreamTurn(async (request, response) => {
+    for await (const _chunk of request);
+    response.writeHead(200, { "content-type": "text/event-stream" });
+    const usage = { input_tokens: 2, output_tokens: 0 };
+    response.write(
+      `event: message_start\ndata: ${JSON.stringify({ type: "message_start", message: { id: "m1", role: "assistant", content: [], usage } })}\n\n`,
+    );
+    setTimeout(() => response.socket?.destroy(), 20);
+  });
+  assert.match(message, /status 200, capture incomplete/);
+  assert.match(message, /native retries denied 1/);
+  assert.equal(retryable, true);
+});
+
+test("reports an upstream connection lost before a response as a retryable error", async () => {
+  // The connection drops before Anthropic sends a status.
+  const hangUp = await failingUpstreamTurn(async (request) => {
+    for await (const _chunk of request);
+    request.socket.destroy();
+  });
+  assert.match(hangUp.message, /connection lost before a response \(status unknown/);
+  assert.match(hangUp.message, /relay failure Error: socket hang up/);
+  assert.equal(hangUp.retryable, true);
+
+  // The connection is refused outright; the reason lives in the error code.
+  const refused = await failingUpstreamTurn();
+  assert.match(refused.message, /connection lost before a response \(status unknown/);
+  assert.match(refused.message, /ECONNREFUSED/);
+  assert.equal(refused.retryable, true);
+});
+
+test("reports upstream 5xx as retryable and keeps 4xx non-retryable", async () => {
+  // 529 (overloaded) is not in Pi's status list and may come without a body.
+  const overloaded = await failingUpstreamTurn(async (request, response) => {
+    for await (const _chunk of request);
+    response.writeHead(529).end();
+  });
+  assert.match(overloaded.message, /upstream server error \(status 529/);
+  assert.equal(overloaded.retryable, true);
+
+  const invalid = await failingUpstreamTurn(async (request, response) => {
+    for await (const _chunk of request);
+    response
+      .writeHead(400, { "content-type": "application/json" })
+      .end(JSON.stringify({ type: "error", error: { type: "invalid_request_error", message: "bad request" } }));
+  });
+  assert.match(invalid.message, /Incomplete Claude Code upstream response \(status 400.*upstream said: bad request/);
+  assert.equal(invalid.retryable, false);
 });

@@ -1163,10 +1163,19 @@ class ClaudeProcess {
           if (this.relay.denied) detail += `, native retries denied ${this.relay.denied}`;
           const upstreamError = this.relay.errorText();
           if (upstreamError) detail += `, upstream said: ${upstreamError.slice(0, 500)}`;
-          // A dropped stream with no upstream error is a transport failure; this
-          // wording is one Pi's retry classifier recognizes.
+          // Claude Code's native retries are off, so Pi's retry classifier is the
+          // only retry left. Word transient failures so it recognizes them.
           if (this.relay.status === 200 && !this.relay.capture.complete && !upstreamError) {
+            // A dropped stream with no upstream error is a transport failure.
             throw new Error(`Claude Code upstream stream ended before message_stop (${detail})`);
+          }
+          if (this.relay.status === undefined && this.relay.upstreamFailed) {
+            // The connection to Anthropic failed before any response status.
+            throw new Error(`Claude Code upstream connection lost before a response (${detail})`);
+          }
+          if (this.relay.status !== undefined && this.relay.status >= 500) {
+            // 5xx such as 529 (overloaded) are transient regardless of the body.
+            throw new Error(`Claude Code upstream server error (${detail})`);
           }
           throw new Error(`Incomplete Claude Code upstream response (${detail})`);
         }
