@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
 import * as http from "node:http";
+import httpModule from "node:http";
+import { syncBuiltinESMExports } from "node:module";
+import * as net from "node:net";
 import test from "node:test";
 import { describeFailure, TurnRelay } from "../src/turn-relay.ts";
 
@@ -132,4 +135,40 @@ test("describes relay failures with their error code and nested errors", () => {
   );
   assert.equal(describeFailure(Object.assign(new Error(""), { code: "ECONNRESET" })), "Error (ECONNRESET)");
   assert.equal(describeFailure("nope"), "UnknownError");
+});
+
+test("gives each upstream address at least 5 s to connect, keeping a larger Node default", async () => {
+  const defaultAttemptTimeout = net.getDefaultAutoSelectFamilyAttemptTimeout();
+  const original = httpModule.request;
+  const seen: unknown[] = [];
+  (httpModule as { request: unknown }).request = (options: { autoSelectFamilyAttemptTimeout?: unknown }, ...rest: unknown[]) => {
+    seen.push(options.autoSelectFamilyAttemptTimeout);
+    return (original as (...args: unknown[]) => unknown)(options, ...rest);
+  };
+  syncBuiltinESMExports();
+  const upstream = http.createServer(async (request, response) => {
+    for await (const _chunk of request);
+    response.writeHead(500).end();
+  });
+  const upstreamPort = await listen(upstream);
+  const relay = new TurnRelay(`http://127.0.0.1:${upstreamPort}`, 5_000);
+  try {
+    const baseUrl = await relay.start();
+    await (await fetch(`${baseUrl}/v1/messages`, { method: "POST", body: "{}" })).text();
+    await relay.settled();
+    assert.equal(seen[0], 5_000);
+
+    net.setDefaultAutoSelectFamilyAttemptTimeout(10_000);
+    relay.finishTurn();
+    relay.beginTurn();
+    await (await fetch(`${baseUrl}/v1/messages`, { method: "POST", body: "{}" })).text();
+    await relay.settled();
+    assert.equal(seen[1], 10_000);
+  } finally {
+    net.setDefaultAutoSelectFamilyAttemptTimeout(defaultAttemptTimeout);
+    (httpModule as { request: unknown }).request = original;
+    syncBuiltinESMExports();
+    await relay.close();
+    await new Promise<void>((resolve) => upstream.close(() => resolve()));
+  }
 });
