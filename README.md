@@ -68,6 +68,22 @@ These environment variables are optional:
   (default: `claude`).
 - `PI_CLAUDE_CODE_CONFIG_DIR`: Claude Code config directory to use. The
   extension passes it to Claude Code as `CLAUDE_CONFIG_DIR`.
+- `PI_CLAUDE_CODE_POWERSHELL`: PowerShell executable used to run a `.ps1`
+  `PI_CLAUDE_CODE_COMMAND` (default: `pwsh` when installed, otherwise
+  `powershell.exe`).
+
+### Windows
+
+npm installs Claude Code as `claude.cmd` (and a `claude.ps1` for PowerShell).
+Both forms work as `PI_CLAUDE_CODE_COMMAND`:
+
+- `.cmd` and `.bat` launchers run through `cmd.exe` with their arguments
+  escaped once and passed verbatim, so installation paths with spaces and
+  arguments containing quotes or `&` reach Claude Code unchanged.
+- `.ps1` launchers run in a noninteractive PowerShell session with
+  `-NoProfile` and `-ExecutionPolicy Bypass`. The extension prefers `pwsh`
+  (PowerShell 7) because Windows PowerShell 5.1 cannot forward every quoted
+  argument from a script to a native program.
 
 ### Model discovery and privacy
 
@@ -111,6 +127,10 @@ overrides for Claude Code.
   response after that can be slower and may use more quota.
 - Complex tool schemas (nullable types, `oneOf`, `allOf`, `anyOf`) may be
   simplified before Claude sees them.
+- On Windows, Windows PowerShell 5.1 mangles quoted arguments (such as the
+  inline MCP configuration JSON) when a `.ps1` launcher forwards them to a
+  native program. Install PowerShell 7 or use the `claude.cmd` launcher in that
+  case.
 - Adding or removing tools in the middle of a conversation keeps the prompt
   cache only on supported models. On other models it may use more quota.
 
