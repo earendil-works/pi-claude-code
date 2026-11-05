@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { constants as fsConstants, existsSync } from "node:fs";
 import { access, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -19,7 +19,7 @@ import type {
   NativeResult,
   NativeUsage,
 } from "./native-types.ts";
-import { TOOL_PREFIX, type NativeSystemInjection, type ToolManifestEntry } from "./transcript.ts";
+import type { NativeSystemInjection, ToolManifestEntry } from "./transcript.ts";
 
 export const INSTALL_HINT =
   "Claude Code is not installed. Install it with `npm install -g @anthropic-ai/claude-code` " +
@@ -52,7 +52,6 @@ export interface RunClaudeInput {
   systemPrompt: string;
   manifest: ToolManifestEntry[];
   extraBody: Record<string, unknown>;
-  toolNames: Set<string>;
   signal?: AbortSignal;
   timeoutMs?: number;
   env?: Record<string, string | undefined>;
@@ -155,9 +154,14 @@ function resolvePowerShell(env: Record<string, string | undefined>): string {
   return "powershell.exe";
 }
 
-function withConfigDirectory(env: Record<string, string | undefined>): Record<string, string> {
+function claudeEnvironment(env: Record<string, string | undefined>): Record<string, string> {
   const output: Record<string, string> = {};
-  for (const [key, value] of Object.entries(env)) if (value !== undefined) output[key] = value;
+  for (const [key, value] of Object.entries(env)) {
+    if (value === undefined) continue;
+    // Windows environment names are case-insensitive, so strip every spelling.
+    const apiKey = process.platform === "win32" ? key.toUpperCase() === "ANTHROPIC_API_KEY" : key === "ANTHROPIC_API_KEY";
+    if (!apiKey) output[key] = value;
+  }
   const configDir = envValue(output, "PI_CLAUDE_CODE_CONFIG_DIR");
   if (configDir) output.CLAUDE_CONFIG_DIR = configDir;
   return output;
@@ -220,7 +224,7 @@ export async function getClaudeStatus(
   envInput: Record<string, string | undefined> = process.env,
   signal?: AbortSignal,
 ): Promise<ClaudeStatus> {
-  const env = withConfigDirectory(envInput);
+  const env = claudeEnvironment(envInput);
   const command = await resolveClaudeExecutable(env);
   if (!command) return { available: false, loggedIn: false, subscription: false, detail: INSTALL_HINT };
 
@@ -281,7 +285,7 @@ async function readyClaudeCommand(
   envInput: Record<string, string | undefined>,
   signal?: AbortSignal,
 ): Promise<string> {
-  const env = withConfigDirectory(envInput);
+  const env = claudeEnvironment(envInput);
   const key = JSON.stringify([
     configuredCommand(env),
     envValue(env, "PATH"),
@@ -554,7 +558,7 @@ class AsyncQueue<T> {
 }
 
 function conflictingEnvironment(env: Record<string, string>): string[] {
-  const conflicts = ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "ANTHROPIC_FOUNDRY_API_KEY"].filter(
+  const conflicts = ["ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "ANTHROPIC_FOUNDRY_API_KEY"].filter(
     (key) => !!env[key],
   );
   for (const key of ["CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY"]) {
@@ -567,13 +571,14 @@ function processEnvironment(
   input: Record<string, string | undefined> | undefined,
   extraBody: Record<string, unknown>,
 ): Record<string, string> {
-  const env = withConfigDirectory({ ...process.env, ...input });
+  const env = claudeEnvironment({ ...process.env, ...input });
   const conflicts = conflictingEnvironment(env);
   if (conflicts.length) {
     throw new Error(`Claude Code subscription provider refuses conflicting auth/backend overrides: ${conflicts.join(", ")}`);
   }
   delete env.CLAUDE_CODE_EXTRA_BODY;
   Object.assign(env, {
+    CLAUDE_CODE_ENTRYPOINT: "pi-agent",
     ENABLE_TOOL_SEARCH: "false",
     CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
     CLAUDE_CODE_MAX_RETRIES: "0",
@@ -587,14 +592,23 @@ function processEnvironment(
   return env;
 }
 
-async function writeFrame(child: ChildProcess, frame: NativeFrame): Promise<void> {
+/** Writes a frame stamped with a fresh uuid, which Claude Code echoes back on that frame's result. */
+async function writeFrame(child: ChildProcess, frame: NativeFrame): Promise<string> {
   if (!child.stdin?.writable) throw new Error("Claude Code stdin closed during history replay");
-  if (!child.stdin.write(`${JSON.stringify(frame)}\n`)) {
+  const uuid = randomUUID();
+  if (!child.stdin.write(`${JSON.stringify({ ...frame, uuid })}\n`)) {
     await new Promise<void>((resolve, reject) => {
       child.stdin!.once("drain", resolve);
       child.stdin!.once("error", reject);
     });
   }
+  return uuid;
+}
+
+/** True when the result names user messages and this turn's frame is not one of them. */
+function resultIsForAnotherMessage(result: NativeResult, uuid: string): boolean {
+  const ids = result.user_message_uuids;
+  return Array.isArray(ids) && ids.length > 0 && !ids.includes(uuid);
 }
 
 function nativeErrorText(event: Extract<NativeOutputEvent, { type: "assistant" }>): string | undefined {
@@ -680,6 +694,12 @@ function setCacheBreakpoint(message: NativeRequestMessage): void {
   if (!Array.isArray(message.content) || message.content.length === 0) return;
   const last = message.content.at(-1);
   if (!last || typeof last !== "object") return;
+  // One breakpoint per message: Claude Code may already have marked an earlier
+  // block (e.g. a trailing date-reminder system message), and a second marker
+  // here would exceed Anthropic's four-breakpoint limit.
+  for (const block of message.content) {
+    if (block && typeof block === "object") delete (block as Record<string, unknown>).cache_control;
+  }
   (last as Record<string, unknown>).cache_control = { type: "ephemeral", ttl: "1h" };
 }
 
@@ -877,6 +897,7 @@ class ClaudeProcess {
   private tipHash?: string;
   private expiryTimer?: NodeJS.Timeout;
   private closed = false;
+  private delivered = false;
   private stderr = "";
 
   private constructor(
@@ -916,7 +937,10 @@ class ClaudeProcess {
       const env = { ...plan.env, ANTHROPIC_BASE_URL: await relay.start() };
       const mcp = {
         mcpServers: {
-          pi: { command: process.execPath, args: [inertMcpPath, toolsPath] },
+          // Standalone Pi is a Bun-compiled binary, so process.execPath is `pi`
+          // itself rather than a JS runtime. BUN_BE_BUN makes it run the script
+          // as Bun; Node ignores it.
+          pi: { command: process.execPath, args: [inertMcpPath, toolsPath], env: { BUN_BE_BUN: "1" } },
         },
       };
       const args = [
@@ -1031,12 +1055,19 @@ class ClaudeProcess {
     return true;
   }
 
+  /** True once the current turn streamed output or reached the upstream API. */
+  get startedOutput(): boolean {
+    return this.delivered || this.relay.used;
+  }
+
   async run(input: RunClaudeInput, continuation: boolean): Promise<RunClaudeOutput> {
     if (!this.isAlive()) throw new Error("Claude Code process is no longer available");
     input.signal?.throwIfAborted();
 
     let sawMessageStop = false;
+    this.delivered = false;
     const deliver = (event: AnthropicStreamEvent) => {
+      this.delivered = true;
       if (event.type === "message_stop") sawMessageStop = true;
       input.onEvent?.(event);
     };
@@ -1064,12 +1095,13 @@ class ClaudeProcess {
     const assistants: NativeMessage[] = [];
     let result: NativeResult | undefined;
     let nativeError: string | undefined;
+    let turnUuid: string | undefined;
     let rateLimit: RateLimitInfo | undefined;
 
     try {
       const frames = continuation ? input.frames.slice(-1) : input.frames;
       for (const frame of frames) {
-        await writeFrame(this.child, frame);
+        const uuid = await writeFrame(this.child, frame);
         if (frame.shouldQuery === false) {
           for (;;) {
             const event = await this.queue.next(input.signal, this.timeoutMs);
@@ -1081,6 +1113,8 @@ class ClaudeProcess {
               break;
             }
           }
+        } else {
+          turnUuid = uuid;
         }
       }
 
@@ -1092,6 +1126,8 @@ class ClaudeProcess {
           if (error !== undefined) nativeError = error;
           else assistants.push(event.message);
         } else if (event.type === "result") {
+          // A late result from an earlier turn may still sit in the queue.
+          if (turnUuid && resultIsForAnotherMessage(event, turnUuid)) continue;
           result = event;
           break;
         } else if (event.type === "rate_limit_event") {
@@ -1111,6 +1147,11 @@ class ClaudeProcess {
           if (this.relay.denied) detail += `, native retries denied ${this.relay.denied}`;
           const upstreamError = this.relay.errorText();
           if (upstreamError) detail += `, upstream said: ${upstreamError.slice(0, 500)}`;
+          // A dropped stream with no upstream error is a transport failure; this
+          // wording is one Pi's retry classifier recognizes.
+          if (this.relay.status === 200 && !this.relay.capture.complete && !upstreamError) {
+            throw new Error(`Claude Code upstream stream ended before message_stop (${detail})`);
+          }
           throw new Error(`Incomplete Claude Code upstream response (${detail})`);
         }
         message = this.relay.capture.message;
@@ -1119,6 +1160,8 @@ class ClaudeProcess {
         message = assistants.at(-1);
       }
 
+      // Native error assistants are not collected; report their text instead of "Incomplete".
+      if (!message && nativeError) throw new Error(`Claude Code API error: ${nativeError}`);
       if (!message || !sawMessageStop || !result) {
         throw new Error(
           `Incomplete Claude Code response: assistant, message_stop and one result required${this.stderr ? ` (${this.stderr.trim().slice(-500)})` : ""}`,
@@ -1131,13 +1174,6 @@ class ClaudeProcess {
       const maxTurnsBoundary = hasTools && result.subtype === "error_max_turns";
       if (!maxTurnsBoundary && !nativeFailureHandled && (result.is_error || result.subtype !== "success")) {
         throw new Error(`Claude Code request failed: ${result.subtype ?? "unknown result"}`);
-      }
-
-      for (const block of message.content) {
-        if (block.type !== "tool_use") continue;
-        if (!block.name.startsWith(TOOL_PREFIX) || !input.toolNames.has(block.name.slice(TOOL_PREFIX.length))) {
-          throw new Error("Claude Code returned a tool outside Pi's current tool inventory");
-        }
       }
 
       const usage = message.usage ?? result.usage;
@@ -1325,6 +1361,11 @@ export async function runClaudeRequest(input: RunClaudeInput): Promise<RunClaude
     return output;
   } catch (error) {
     await discardProcess(acquired);
+    // A warm process can hold stale hidden state. If it failed before streaming
+    // or reaching the API, nothing was shown or charged, so replay once on a fresh process.
+    if (acquired.continuation && !acquired.worker.startedOutput && !input.signal?.aborted) {
+      return runClaudeRequest(input);
+    }
     throw error;
   }
 }

@@ -323,7 +323,7 @@ export class TurnRelay {
       if (this.status === 200) this.capture.finish();
       response.end();
     } catch (error) {
-      this.failure = error instanceof Error ? error.name : "UnknownError";
+      this.failure = error instanceof Error ? String(error) : "UnknownError";
       if (!response.headersSent) response.writeHead(this.cancelled ? 499 : 502).end();
       else response.destroy();
     } finally {

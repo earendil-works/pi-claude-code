@@ -6,13 +6,14 @@ import {
   type AssistantMessage,
   type ImageContent,
   type Message,
+  type Model,
   type SimpleStreamOptions,
   type SystemMessage,
   type TextContent,
   type Tool,
   type ToolResultMessage,
 } from "@earendil-works/pi-ai";
-import { supportsAdaptiveThinking } from "./model-catalog.ts";
+import { supportsAdaptiveThinking, supportsDisabledThinking } from "./model-catalog.ts";
 import type { NativeContentBlock, NativeFrame, NativeMessage } from "./native-types.ts";
 
 export const TOOL_PREFIX = "mcp__pi__";
@@ -52,6 +53,40 @@ interface AssistantProjection {
 
 function sanitizeSurrogates(text: string): string {
   return text.replace(/[\uD800-\uDFFF]/gu, "\uFFFD");
+}
+
+function nativeToolUseId(id: string): string {
+  return id.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 64);
+}
+
+export function prepareMessages(messages: Message[], model: Model<any>): Message[] {
+  const toolCallIds = new Map<string, string>();
+  return messages.map((message) => {
+    if (message.role === "toolResult") {
+      const id = toolCallIds.get(message.toolCallId);
+      return id && id !== message.toolCallId ? { ...message, toolCallId: id } : message;
+    }
+    if (
+      message.role !== "assistant" ||
+      (message.provider === model.provider && message.api === model.api && message.model === model.id)
+    ) {
+      return message;
+    }
+    return {
+      ...message,
+      diagnostics: message.diagnostics?.filter((item) => item.type !== NATIVE_REPLAY_DIAGNOSTIC),
+      content: message.content.flatMap((block): AssistantMessage["content"] => {
+        // Like pi-ai, drop thinking from other models: signatures only validate
+        // for their own model, and replaying it as text reads as visible reply.
+        if (block.type === "thinking") return [];
+        if (block.type === "text") return [{ type: "text", text: block.text }];
+        const id = nativeToolUseId(block.id);
+        toolCallIds.set(block.id, id);
+        const { thoughtSignature, ...toolCall } = block;
+        return [{ ...toolCall, id }];
+      }),
+    };
+  });
 }
 
 function clone<T>(value: T): T {
@@ -370,10 +405,14 @@ export function buildExtraBody(
   if (options?.maxTokens !== undefined) body.max_tokens = options.maxTokens;
 
   if (options?.reasoning) {
-    if (supportsAdaptiveThinking(modelId)) body.thinking = { type: "adaptive" };
+    if (supportsAdaptiveThinking(modelId)) body.thinking = { type: "adaptive", display: "summarized" };
     body.output_config = {
       effort: options.reasoning === "minimal" ? "low" : options.reasoning,
     };
+  } else if (!supportsDisabledThinking(modelId)) {
+    // Models such as Opus 5.5 reject `disabled`; use the lowest adaptive effort instead.
+    body.thinking = { type: "adaptive" };
+    body.output_config = { effort: "low" };
   } else {
     body.thinking = { type: "disabled" };
     // Native clear-thinking edits are invalid when thinking is disabled.

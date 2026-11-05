@@ -25,6 +25,7 @@ const BUILTIN_ANTHROPIC_MODELS: Record<string, Model<"anthropic-messages">> = Ob
 const NATIVE_ROUTE_BY_ID = new Map<string, string>();
 const NATIVE_TOOL_CHANGES_BY_ID = new Map<string, boolean>();
 const ADAPTIVE_THINKING_BY_ID = new Map<string, boolean>();
+const DISABLED_THINKING_BY_ID = new Map<string, boolean>();
 
 const FALLBACK_DISCOVERY: DiscoveredClaudeModel[] = [
   {
@@ -140,6 +141,12 @@ export function modelFromDiscovery(info: DiscoveredClaudeModel): ClaudeCodeModel
   NATIVE_ROUTE_BY_ID.set(id, info.value);
   NATIVE_TOOL_CHANGES_BY_ID.set(id, builtin?.compat?.supportsMidConvoToolChanges === true);
   ADAPTIVE_THINKING_BY_ID.set(id, info.supportsAdaptiveThinking === true);
+  DISABLED_THINKING_BY_ID.set(
+    id,
+    // Pi marks models that reject `thinking.type: disabled` with `off: null`. Unknown
+    // adaptive models are assumed to be newer and therefore unable to disable thinking.
+    builtin ? builtin.thinkingLevelMap?.off !== null : info.supportsAdaptiveThinking !== true,
+  );
   return builtin ? fromBuiltin(info, id, builtin) : fallbackModel(info, id);
 }
 
@@ -162,6 +169,15 @@ function canonicalRoute(model: string): string {
 export function supportsAdaptiveThinking(model: string): boolean {
   const canonical = canonicalRoute(model);
   return ADAPTIVE_THINKING_BY_ID.get(model) ?? ADAPTIVE_THINKING_BY_ID.get(canonical) ?? true;
+}
+
+/** Whether the API accepts `thinking: { type: "disabled" }` for this model. */
+export function supportsDisabledThinking(model: string): boolean {
+  const canonical = canonicalRoute(model);
+  const known = DISABLED_THINKING_BY_ID.get(model) ?? DISABLED_THINKING_BY_ID.get(canonical);
+  if (known !== undefined) return known;
+  const builtin = BUILTIN_ANTHROPIC_MODELS[canonical];
+  return builtin ? builtin.thinkingLevelMap?.off !== null : !supportsAdaptiveThinking(model);
 }
 
 /** Whether Anthropic currently accepts native mid-conversation tool blocks for this route. */

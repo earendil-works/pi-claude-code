@@ -191,7 +191,6 @@ test("readiness errors surface the status diagnostic instead of a login hint", {
       systemPrompt: "system",
       manifest: [],
       extraBody: { tools: [] },
-      toolNames: new Set(),
       env: { PI_CLAUDE_CODE_COMMAND: crashing },
       timeoutMs: 5_000,
     }),

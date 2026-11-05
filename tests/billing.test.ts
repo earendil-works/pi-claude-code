@@ -102,7 +102,6 @@ for await (const line of input) {
       systemPrompt: "system",
       manifest: [],
       extraBody: { tools: [] },
-      toolNames: new Set(),
       env: { PI_CLAUDE_CODE_COMMAND: executable, ...env },
       timeoutMs: 5_000,
     });
