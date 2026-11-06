@@ -60,6 +60,11 @@ or store your Claude Code credentials.
 Run `/claude-code-status` in Pi to check that Claude Code is installed and
 logged in.
 
+To keep startup fast, the extension saves the last logged-in status (not
+credentials) in `~/.pi/agent/cache/claude-code-status.json` and checks the
+real status in the background after Pi starts. After you log out, the models
+disappear from the model list a moment after startup.
+
 ## Configuration
 
 These environment variables are optional:

@@ -24,6 +24,16 @@ headers do pass transiently through the local turn relay described below.
 The provider has an ambient API-key-style auth method without a login flow. Its
 `check()` runs `claude auth status` and reports the provider as configured only
 when Claude Code is installed and logged in, so Pi hides the models otherwise.
+Pi awaits this check before startup finishes and runs it several times while
+starting, so `check()` goes through a stale-while-revalidate cache
+(`src/status-cache.ts`). Concurrent checks share one `claude auth status`
+process. A logged-in result is saved to `<agent dir>/cache/claude-code-status.json`
+(only the logged-in flag and plan, never credentials), and the next start
+answers from it without waiting for Claude Code. On `session_start` the
+extension runs the real check in the background; if the result differs from
+what Pi was told, it calls `modelRegistry.refresh()` for the provider so the
+models appear or disappear without a restart. A saved logged-out status is not
+trusted, so a new login is picked up on the next start.
 Requests resolve to a placeholder key. It reports Claude
 subscription logins as OAuth-shaped auth so that Pi labels list-price accounting
 as a subscription. The provider also declares an `oauth` method, marked
