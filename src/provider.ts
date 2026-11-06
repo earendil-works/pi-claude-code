@@ -1,6 +1,9 @@
+import { join } from "node:path";
 import { createProvider, type AuthContext, type ProviderEnv } from "@earendil-works/pi-ai";
+import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { discoverClaudeModels, getClaudeStatus, LOGIN_HINT, POWERSHELL_ENV } from "./claude-cli.ts";
 import { API_ID, CLAUDE_CODE_MODELS, modelFromDiscovery, PROVIDER_ID } from "./model-catalog.ts";
+import { ClaudeStatusCache } from "./status-cache.ts";
 import { streamClaudeCode } from "./stream.ts";
 
 const PROVIDER_ENV_NAMES = [
@@ -31,6 +34,21 @@ export function claudeCodeEnv(): Record<string, string | undefined> {
   return { ...process.env, ...lastProviderEnv };
 }
 
+/**
+ * Login status for Pi's auth check. Startup uses the last saved logged-in
+ * status instead of waiting for `claude auth status`; `revalidateClaudeStatus`
+ * corrects it in the background.
+ */
+export const claudeStatusCache = new ClaudeStatusCache({
+  path: () => join(getAgentDir(), "cache", "claude-code-status.json"),
+  probe: (env) => getClaudeStatus(env),
+});
+
+/** Run a live status check. Resolves true when Pi was given an out-of-date status. */
+export function revalidateClaudeStatus(): Promise<boolean> {
+  return claudeStatusCache.revalidate(claudeCodeEnv());
+}
+
 export function createClaudeCodeProvider() {
   let discoveredIds: Set<string> | undefined;
   const externalOAuthMarker = () => ({
@@ -52,7 +70,7 @@ export function createClaudeCodeProvider() {
         async check({ ctx, signal }) {
           const providerEnv = await providerEnvironment(ctx);
           lastProviderEnv = providerEnv;
-          const status = await getClaudeStatus(claudeCodeEnv(), signal);
+          const status = await claudeStatusCache.check(claudeCodeEnv(), signal);
           // Only report the provider as configured when Claude Code is
           // installed and logged in, so Pi hides its models otherwise.
           if (!status.available || !status.loggedIn) return undefined;
