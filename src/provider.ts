@@ -40,7 +40,7 @@ export function claudeCodeEnv(): Record<string, string | undefined> {
  * corrects it in the background.
  */
 export const claudeStatusCache = new ClaudeStatusCache({
-  path: join(getAgentDir(), "cache", "claude-code-status.json"),
+  path: () => join(getAgentDir(), "cache", "claude-code-status.json"),
   probe: (env) => getClaudeStatus(env),
 });
 

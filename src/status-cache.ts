@@ -13,8 +13,8 @@ interface StatusFile {
 }
 
 export interface StatusCacheOptions {
-  /** JSON file that keeps the last status between Pi runs. */
-  path: string;
+  /** JSON file that keeps the last status between Pi runs, resolved on each use. */
+  path: string | (() => string);
   /** Runs the real check, normally `getClaudeStatus`. */
   probe: (env: Env) => Promise<ClaudeStatus>;
   /** How long one live check is shared by later calls in this process. */
@@ -55,7 +55,7 @@ function sameStatus(a: StoredStatus, b: StoredStatus): boolean {
  * next start without waiting for a background check.
  */
 export class ClaudeStatusCache {
-  private readonly path: string;
+  private readonly resolvePath: () => string;
   private readonly probe: (env: Env) => Promise<ClaudeStatus>;
   private readonly liveTtlMs: number;
   private readonly live = new Map<string, { promise: Promise<StoredStatus>; expires: number }>();
@@ -66,7 +66,8 @@ export class ClaudeStatusCache {
   private writes: Promise<void> = Promise.resolve();
 
   constructor(options: StatusCacheOptions) {
-    this.path = options.path;
+    const { path } = options;
+    this.resolvePath = typeof path === "string" ? () => path : path;
     this.probe = options.probe;
     this.liveTtlMs = options.liveTtlMs ?? 30_000;
   }
@@ -123,7 +124,7 @@ export class ClaudeStatusCache {
 
   private async readFile(): Promise<StatusFile | undefined> {
     try {
-      const parsed = JSON.parse(await readFile(this.path, "utf8")) as Partial<StatusFile>;
+      const parsed = JSON.parse(await readFile(this.resolvePath(), "utf8")) as Partial<StatusFile>;
       return parsed.version === 1 && parsed.entries && typeof parsed.entries === "object"
         ? (parsed as StatusFile)
         : undefined;
@@ -142,10 +143,11 @@ export class ClaudeStatusCache {
       try {
         const file = (await this.readFile()) ?? { version: 1, entries: {} };
         file.entries[key] = { ...status, checkedAt: Date.now() };
-        await mkdir(dirname(this.path), { recursive: true });
-        const temporary = `${this.path}.${process.pid}.tmp`;
+        const path = this.resolvePath();
+        await mkdir(dirname(path), { recursive: true });
+        const temporary = `${path}.${process.pid}.tmp`;
         await writeFile(temporary, `${JSON.stringify(file, null, 2)}\n`, { mode: 0o600 });
-        await rename(temporary, this.path);
+        await rename(temporary, path);
       } catch {
         // The cache only speeds up startup; a failed write means the next start checks live.
       }
