@@ -801,3 +801,39 @@ test("reports upstream 5xx as retryable and keeps 4xx non-retryable", async () =
   assert.match(invalid.message, /Incomplete Claude Code upstream response \(status 400.*upstream said: bad request/);
   assert.equal(invalid.retryable, false);
 });
+
+test("accepts a string-content first user message from clipboard image paste (#31)", () => {
+  // Pi's clipboard image paste inserts the file path as the leading text of
+  // the first user message. Claude Code sends that message back with STRING
+  // content (not an array), which the guard rejected outright even though
+  // restoreCanonicalUserContent handles string content already (#31).
+  const imagePath = "/tmp/pi-clipboard-test.png";
+  const canonicalContent = [text(`${imagePath} should we do anything with this?`)];
+  const wire: WireMessage[] = [
+    { role: "user", content: `${imagePath} should we do anything with this?` },
+    {
+      role: "assistant",
+      content: [{ type: "tool_use", id: "t1", name: "read", input: { file_path: imagePath } }],
+    },
+    {
+      role: "user",
+      content: [{ type: "tool_result", tool_use_id: "t1", content: "image bytes" }],
+    },
+  ];
+  const frames: NativeFrame[] = [
+    { type: "user", message: { role: "user", content: structuredClone(canonicalContent) } },
+    {
+      type: "assistant",
+      message: {
+        role: "assistant",
+        content: [{ type: "tool_use", id: "t1", name: "read", input: { file_path: imagePath } }] as unknown[],
+      },
+    },
+    { type: "user", message: { role: "user", content: [{ type: "tool_result", tool_use_id: "t1", content: "image bytes" }] as unknown[] } },
+  ];
+
+  const result = rewrite(wire, frames);
+
+  assert.deepEqual(result[0].content, [{ type: "text", text: `${imagePath} should we do anything with this?` }]);
+  assert.deepEqual(result[2].content, [{ type: "tool_result", tool_use_id: "t1", content: "image bytes" }]);
+});

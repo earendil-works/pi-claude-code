@@ -859,7 +859,11 @@ export function rewriteInitialRequest(
   };
   let messages = payload.messages;
   const first = messages?.[0];
-  if (first?.role !== "user" || !Array.isArray(first.content)) {
+  // Claude Code can send the first user message with plain STRING content —
+  // e.g. when Pi's clipboard image paste makes the leading text an image file
+  // path (#31). restoreCanonicalUserContent normalizes string content already,
+  // so the guard only needs to see a user message.
+  if (first?.role !== "user" || typeof first.content !== "string" && !Array.isArray(first.content)) {
     throw new Error("Claude Code request is missing its initial user message");
   }
   if (messages) restoreCanonicalUserContent(messages, frames);
