@@ -96,6 +96,55 @@ test("stabilizes Claude Code's native replay reminders and cache breakpoint", ()
   assert.deepEqual((rewritten.at(-1)?.content as Block[]).at(-1)?.cache_control, { type: "ephemeral", ttl: "1h" });
 });
 
+test("keeps the prefix stable when the date reminder sits mid-history", () => {
+  const environment = { role: "system", content: "environment reminder\nToday's date is 2026-11-08." };
+  const date = { role: "system", content: "Today's date is 2026-11-08." };
+  const inspect = { role: "user", content: [text("inspect")] };
+  const call = { role: "assistant", content: [{ type: "tool_use", id: "t1", name: "read", input: {} }] };
+  const result = { role: "user", content: [{ type: "tool_result", tool_use_id: "t1", content: "result" }] };
+  const reply = { role: "assistant", content: [text("done")] };
+  const thanks = { role: "user", content: [text("thanks")] };
+  const ok = { role: "assistant", content: [text("ok")] };
+  const next = { role: "user", content: [text("next")] };
+
+  // Claude Code appended the date after the tool result, and the process kept it there.
+  const first = rewrite(
+    [inspect, environment, call, result, date, reply, thanks],
+    framesFor([inspect, call, result, reply, thanks]),
+    [environment],
+  );
+  // A later fresh replay of the same history has no date at that position.
+  const second = rewrite(
+    [inspect, environment, call, result, reply, thanks, ok, next],
+    framesFor([inspect, call, result, reply, thanks, ok, next]),
+    [environment],
+  );
+
+  assert.deepEqual(withoutMarkers(second.slice(0, first.length)), withoutMarkers(first));
+});
+
+test("drops a repeated date reminder without captured system messages", () => {
+  const canonical = [
+    { role: "user", content: [text("inspect")] },
+    { role: "assistant", content: [{ type: "tool_use", id: "t1", name: "read", input: {} }] },
+    { role: "user", content: [{ type: "tool_result", tool_use_id: "t1", content: "result" }] },
+    { role: "assistant", content: [text("done")] },
+  ];
+  const wire = [
+    canonical[0]!,
+    { role: "system", content: "environment reminder\nToday's date is 2026-11-08." },
+    canonical[1]!,
+    canonical[2]!,
+    { role: "system", content: "Today's date is 2026-11-08." },
+    canonical[3]!,
+  ];
+  const rewritten = rewrite(wire, framesFor(canonical));
+  assert.deepEqual(
+    rewritten.map((message) => message.role),
+    ["user", "system", "assistant", "user", "assistant"],
+  );
+});
+
 test("strips reminders when the first user message carries none (issue #27)", () => {
   const canonical = [
     { role: "user", content: [text("inspect")] },
