@@ -889,14 +889,17 @@ export function rewriteInitialRequest(
   // Native tools and replayed history can already carry cache markers. Budget
   // across the entire final request, preserving the latest boundaries.
   const markers: Record<string, unknown>[] = [];
-  const collect = (value: unknown): void => {
-    if (Array.isArray(value)) { value.forEach(collect); return; }
-    if (!value || typeof value !== "object") return;
-    const block = value as Record<string, unknown>;
-    if (block.cache_control) markers.push(block);
-    for (const [key, child] of Object.entries(block)) if (key !== "cache_control") collect(child);
+  // Only API block boundaries carry markers. Never descend into schemas,
+  // tool inputs, tool results or structured user data with the same key.
+  const collect = (blocks: unknown): void => {
+    if (!Array.isArray(blocks)) return;
+    for (const block of blocks) {
+      if (block && typeof block === "object" && block.cache_control?.type === "ephemeral") markers.push(block);
+    }
   };
-  collect(payload);
+  collect((payload as { tools?: unknown }).tools);
+  collect(payload.system);
+  for (const message of payload.messages ?? []) collect(message.content);
   for (const block of markers.slice(0, -4)) delete block.cache_control;
   return Buffer.from(JSON.stringify(payload));
 }

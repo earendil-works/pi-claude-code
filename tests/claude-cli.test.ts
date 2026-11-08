@@ -813,3 +813,33 @@ test("reports upstream 5xx as retryable and keeps 4xx non-retryable", async () =
    assert.equal(output.messages.at(-1).content.at(-1).text, "second");
    assert.deepEqual(input.tools[0].cache_control, {type: "ephemeral", ttl: "1h"});
  });
+
+
+test("cache budgeting preserves tool schemas and structured content named cache_control", () => {
+  const marker = { type: "ephemeral" };
+  const schema = {
+    type: "object",
+    properties: { cache_control: { type: "string", description: "User supplied cache setting" } },
+    required: ["cache_control"],
+    additionalProperties: false,
+  };
+  const toolInput = { cache_control: { type: "ephemeral" }, nested: { cache_control: "keep" } };
+  const resultContent = [{ type: "text", text: "result", cache_control: marker }];
+  const messages = [
+    { role: "user", content: [{ type: "text", text: "first", cache_control: marker }] },
+    { role: "assistant", content: [{ type: "tool_use", id: "t1", name: "cache_tool", input: toolInput, cache_control: marker }] },
+    { role: "user", content: [{ type: "tool_result", tool_use_id: "t1", content: resultContent, cache_control: marker }] },
+  ];
+  const input = {
+    tools: [{ name: "cache_tool", input_schema: schema, cache_control: marker }],
+    system: [{ type: "text", text: "system", cache_control: marker }],
+    messages,
+  };
+  const output = JSON.parse(rewriteInitialRequest(Buffer.from(JSON.stringify(input)), framesFor(messages), undefined).toString());
+  assert.deepEqual(output.tools[0].input_schema, schema);
+  assert.deepEqual(output.messages[1].content[0].input, toolInput);
+  assert.deepEqual(output.messages[2].content[0].content, resultContent);
+  const boundaries = [...output.tools, ...output.system, ...output.messages.flatMap((m: { content: unknown[] }) => m.content)];
+  assert.equal(boundaries.filter(b => b.cache_control).length, 4);
+  assert.equal(output.tools[0].cache_control, undefined);
+});
