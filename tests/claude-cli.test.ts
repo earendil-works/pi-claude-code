@@ -801,3 +801,15 @@ test("reports upstream 5xx as retryable and keeps 4xx non-retryable", async () =
   assert.match(invalid.message, /Incomplete Claude Code upstream response \(status 400.*upstream said: bad request/);
   assert.equal(invalid.retryable, false);
 });
+ test("budgets cache markers across native tools, system and replay history", () => {
+   const cached = (text: string) => ({type: "text", text, cache_control: {type: "ephemeral", ttl: "1h"}});
+   const input = {tools: [cached("tool")], system: [cached("identity"), cached("prompt")], messages: [
+     {role: "user", content: [cached("first")]},
+     {role: "assistant", content: [cached("reply")]},
+     {role: "user", content: [cached("second")]},
+   ]};
+   const output = JSON.parse(rewriteInitialRequest(Buffer.from(JSON.stringify(input)), framesFor(input.messages), undefined, []).toString());
+   assert.equal((JSON.stringify(output).match(/"cache_control"/g) ?? []).length, 4);
+   assert.equal(output.messages.at(-1).content.at(-1).text, "second");
+   assert.deepEqual(input.tools[0].cache_control, {type: "ephemeral", ttl: "1h"});
+ });
