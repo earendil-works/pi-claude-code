@@ -329,6 +329,57 @@ test("keeps one breakpoint in a pre-marked multi-block final message (issue #10)
   assert.deepEqual(final.at(-1)?.cache_control, marker);
 });
 
+test("keeps four breakpoints when a system update follows Claude Code's marked user message", () => {
+  // Seen live 2026-11-07: Pi's mid-session "Updated system prompt section" arrives as a
+  // trailing system message after the newest user message, which Claude Code had
+  // already marked. That marker plus the final and previous-query markers made five
+  // ("A maximum of 4 blocks with cache_control may be provided. Found 5.").
+  const marker = { type: "ephemeral", ttl: "1h" };
+  const body = {
+    system: [
+      { type: "text", text: "billing" },
+      { type: "text", text: "identity", cache_control: marker },
+      { type: "text", text: "prompt", cache_control: marker },
+    ],
+    tools: [{ name: "mcp__pi__bash", input_schema: { type: "object" }, cache_control: marker }],
+    messages: [
+      { role: "user", content: [{ type: "text", text: "one" }] },
+      { role: "system", content: [{ type: "text", text: "environment" }] },
+      { role: "assistant", content: [{ type: "text", text: "a1" }] },
+      { role: "user", content: [{ type: "text", text: "two" }] },
+      { role: "assistant", content: [{ type: "text", text: "a2" }] },
+      { role: "user", content: [{ type: "text", text: "three", cache_control: marker }] },
+      { role: "system", content: [{ type: "text", text: "Updated system prompt section" }] },
+    ],
+  };
+  const rewritten = JSON.parse(
+    rewriteInitialRequest(
+      Buffer.from(JSON.stringify(body)),
+      framesFor(body.messages),
+      [{ role: "system", content: [{ type: "text", text: "environment", cache_control: marker }] }],
+      [{ beforeAssistant: null, content: [{ type: "text", text: "Updated system prompt section" }] }],
+    ).toString("utf8"),
+  );
+  const count = (value: unknown): number =>
+    Array.isArray(value)
+      ? value.reduce((sum: number, child) => sum + count(child), 0)
+      : value && typeof value === "object"
+        ? Object.entries(value).reduce(
+            (sum: number, [key, child]) => sum + (key === "cache_control" ? 1 : count(child)),
+            0,
+          )
+        : 0;
+  assert.equal(count(rewritten), 4);
+  // The previous query ("two") and the final message keep the conversation markers.
+  const messages = rewritten.messages as Array<{ role: string; content: unknown }>;
+  const marked = messages.flatMap((message, index) => (count(message.content) ? [index] : []));
+  assert.deepEqual(marked, [messages.findIndex((message) => contentHas(message, "two")), messages.length - 1]);
+});
+
+function contentHas(message: { content: unknown }, text: string): boolean {
+  return Array.isArray(message.content) && message.content.some((block) => (block as Block).text === text);
+}
+
 const userFrame = (text: string) => ({
   type: "user" as const,
   message: { role: "user" as const, content: [{ type: "text", text }] },
