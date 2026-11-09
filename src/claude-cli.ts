@@ -952,17 +952,33 @@ class ClaudeProcess {
   private closed = false;
   private delivered = false;
   private stderr = "";
+  readonly fingerprint: string;
+  private readonly root: string;
+  private readonly child: ChildProcess;
+  private readonly relay: TurnRelay;
+  private readonly queue: AsyncQueue<NativeOutputEvent>;
+  private readonly readTask: Promise<void>;
+  private readonly exitOutcome: Promise<{ code?: number; error?: Error }>;
+  private readonly timeoutMs: number;
 
   private constructor(
-    readonly fingerprint: string,
-    private readonly root: string,
-    private readonly child: ChildProcess,
-    private readonly relay: TurnRelay,
-    private readonly queue: AsyncQueue<NativeOutputEvent>,
-    private readonly readTask: Promise<void>,
-    private readonly exitOutcome: Promise<{ code?: number; error?: Error }>,
-    private readonly timeoutMs: number,
+    fingerprint: string,
+    root: string,
+    child: ChildProcess,
+    relay: TurnRelay,
+    queue: AsyncQueue<NativeOutputEvent>,
+    readTask: Promise<void>,
+    exitOutcome: Promise<{ code?: number; error?: Error }>,
+    timeoutMs: number,
   ) {
+    this.fingerprint = fingerprint;
+    this.root = root;
+    this.child = child;
+    this.relay = relay;
+    this.queue = queue;
+    this.readTask = readTask;
+    this.exitOutcome = exitOutcome;
+    this.timeoutMs = timeoutMs;
     child.stderr?.setEncoding("utf8");
     child.stderr?.on("data", (chunk: string) => (this.stderr = (this.stderr + chunk).slice(-65_536)));
   }
