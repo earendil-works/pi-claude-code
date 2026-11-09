@@ -4,10 +4,6 @@ import { randomBytes } from "node:crypto";
 import type { AddressInfo } from "node:net";
 import type { AnthropicStreamEvent, NativeContentBlock, NativeMessage } from "./native-types.ts";
 
-function copy<T>(value: T): T {
-  return structuredClone(value);
-}
-
 export class AnthropicCapture {
   message?: NativeMessage;
   complete = false;
@@ -53,10 +49,10 @@ export class AnthropicCapture {
   private apply(event: AnthropicStreamEvent): void {
     switch (event.type) {
       case "message_start":
-        this.message = copy(event.message);
+        this.message = structuredClone(event.message);
         break;
       case "content_block_start":
-        if (this.message) this.message.content[event.index] = copy(event.content_block);
+        if (this.message) this.message.content[event.index] = structuredClone(event.content_block);
         break;
       case "content_block_delta": {
         const block = this.message?.content[event.index];
@@ -141,7 +137,6 @@ export class TurnRelay {
   upstreamFailed = false;
   errorBody = Buffer.alloc(0);
   originalRequestBody?: Buffer;
-  requestBody?: Buffer;
 
   private readonly upstream: URL;
   private readonly prefix = `/turn/${randomBytes(32).toString("base64url")}`;
@@ -155,13 +150,7 @@ export class TurnRelay {
   private requestBetas: string[] = [];
   private readonly timeoutMs: number;
 
-  constructor(
-    upstream = "https://api.anthropic.com",
-    timeoutMs = 180_000,
-    onEvent?: (event: AnthropicStreamEvent) => void,
-    transformRequest?: (body: Buffer) => Buffer,
-    requestBetas: string[] = [],
-  ) {
+  constructor(upstream = "https://api.anthropic.com", timeoutMs = 180_000) {
     this.timeoutMs = timeoutMs;
     this.upstream = new URL(upstream);
     const loopback = ["127.0.0.1", "::1", "localhost"].includes(this.upstream.hostname);
@@ -174,9 +163,7 @@ export class TurnRelay {
     ) {
       throw new Error("Claude Code upstream must be HTTPS or a loopback HTTP fixture");
     }
-    this.capture = new AnthropicCapture(onEvent);
-    this.transformRequest = transformRequest;
-    this.requestBetas = requestBetas;
+    this.capture = new AnthropicCapture();
     this.server = http.createServer((request, response) => {
       const operation = this.handle(request, response).finally(() => this.active.delete(operation));
       this.active.add(operation);
@@ -200,7 +187,6 @@ export class TurnRelay {
     this.upstreamFailed = false;
     this.errorBody = Buffer.alloc(0);
     this.originalRequestBody = undefined;
-    this.requestBody = undefined;
     this.transformRequest = transformRequest;
     this.requestBetas = requestBetas;
     this.cancelled = false;
@@ -240,17 +226,13 @@ export class TurnRelay {
     }
   }
 
-  abort(): void {
-    this.finishTurn();
-  }
-
   async settled(): Promise<void> {
     await Promise.allSettled([...this.active]);
   }
 
   async close(): Promise<void> {
     this.closed = true;
-    this.abort();
+    this.finishTurn();
     await new Promise<void>((resolve) => {
       if (!this.server.listening) return resolve();
       this.server.close(() => resolve());
@@ -285,7 +267,6 @@ export class TurnRelay {
       let body = await this.readBody(request);
       this.originalRequestBody = Buffer.from(body);
       if (this.transformRequest) body = this.transformRequest(body);
-      this.requestBody = Buffer.from(body);
       if (this.cancelled) return;
 
       const headers: http.OutgoingHttpHeaders = {};

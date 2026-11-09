@@ -189,9 +189,3 @@ export function supportsNativeToolChanges(model: string): boolean {
     BUILTIN_ANTHROPIC_MODELS[canonical]?.compat?.supportsMidConvoToolChanges === true
   );
 }
-
-export function modelForDiscoveredRoute(route: string, label?: string): ClaudeCodeModel | undefined {
-  const canonical = withoutContextSuffix(ALIASES[withoutContextSuffix(route)] ?? route);
-  const known = CLAUDE_CODE_MODELS.find((model) => model.id === canonical);
-  return known ? { ...known, name: label ? `${label} (Claude Code)` : known.name } : undefined;
-}

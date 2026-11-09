@@ -33,7 +33,6 @@ export interface ClaudeStatus {
   loggedIn: boolean;
   /** True when Claude Code reports a Claude Pro/Max-style subscription login. */
   subscription: boolean;
-  authMethod?: string;
   plan?: string;
   detail?: string;
   command?: string;
@@ -69,9 +68,7 @@ export interface RunClaudeInput {
 
 export interface RunClaudeOutput {
   message: NativeMessage;
-  result: NativeResult;
   usage: NativeUsage;
-  exitCode: number;
   relay: {
     upstreamRequests: number;
     blockedRequests: number;
@@ -264,7 +261,6 @@ export async function getClaudeStatus(
     loggedIn,
     subscription: loggedIn && !!plan,
     command,
-    authMethod: typeof payload.authMethod === "string" ? payload.authMethod : undefined,
     plan,
     detail: loggedIn ? undefined : LOGIN_HINT,
   };
@@ -836,17 +832,6 @@ function injectNativeSystemMessages(
   return output;
 }
 
-function normalizeLeadingSystemCache(system: unknown): void {
-  if (!Array.isArray(system)) return;
-  for (const block of system) {
-    if (block && typeof block === "object") delete (block as Record<string, unknown>).cache_control;
-  }
-  const last = system.at(-1);
-  if (last && typeof last === "object") {
-    (last as Record<string, unknown>).cache_control = { type: "ephemeral", ttl: "1h" };
-  }
-}
-
 export function rewriteInitialRequest(
   body: Buffer,
   frames: NativeFrame[],
@@ -882,7 +867,7 @@ export function rewriteInitialRequest(
   if (nativeSystemInjections) {
     messages = injectNativeSystemMessages(messages!, nativeSystemInjections);
     payload.messages = messages;
-    normalizeLeadingSystemCache(payload.system);
+    if (Array.isArray(payload.system)) setCacheBreakpoint({ content: payload.system });
   }
   if (initialSystemMessages?.length || nativeSystemInjections) setReplayCacheBreakpoints(messages!);
 
@@ -1073,7 +1058,6 @@ class ClaudeProcess {
       );
       return new ClaudeProcess(plan.fingerprint, root, child, relay, queue, readTask, exitOutcome, plan.timeoutMs);
     } catch (error) {
-      relay?.abort();
       if (child && child.exitCode === null) killProcessTree(child);
       await relay?.close();
       await rm(root, { recursive: true, force: true });
@@ -1147,7 +1131,7 @@ class ClaudeProcess {
     );
 
     const abort = () => {
-      this.relay.abort();
+      this.relay.finishTurn();
       this.closeNow();
     };
     input.signal?.addEventListener("abort", abort, { once: true });
@@ -1257,9 +1241,7 @@ class ClaudeProcess {
 
       return {
         message,
-        result,
         usage,
-        exitCode: this.child.exitCode ?? 0,
         relay: {
           upstreamRequests: Number(this.relay.used),
           blockedRequests: this.relay.denied,
@@ -1285,7 +1267,7 @@ class ClaudeProcess {
     if (this.closed) return;
     this.closed = true;
     this.clearExpiryTimer();
-    this.relay.abort();
+    this.relay.finishTurn();
     if (this.child.exitCode === null) killProcessTree(this.child);
   }
 
