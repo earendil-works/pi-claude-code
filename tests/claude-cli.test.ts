@@ -13,6 +13,7 @@ import {
   rewriteInitialRequest,
   runClaudeRequest,
 } from "../src/claude-cli.ts";
+import * as claudeCli from "../src/claude-cli.ts";
 import type { NativeFrame } from "../src/native-types.ts";
 import { createClaudeCodeProvider } from "../src/provider.ts";
 
@@ -800,4 +801,78 @@ test("reports upstream 5xx as retryable and keeps 4xx non-retryable", async () =
   });
   assert.match(invalid.message, /Incomplete Claude Code upstream response \(status 400.*upstream said: bad request/);
   assert.equal(invalid.retryable, false);
+});
+
+test("caps cache_control markers at four, keeping prefix and the final message boundary", () => {
+  const mark = { type: "ephemeral", ttl: "1h" };
+  const payload = {
+    tools: [{ name: "a" }, { name: "b", cache_control: mark }],
+    system: [{ type: "text", text: "s1", cache_control: mark }, { type: "text", text: "s2", cache_control: mark }],
+    messages: [
+      { role: "user", content: [{ type: "text", text: "u1", cache_control: mark }] },
+      { role: "assistant", content: [{ type: "text", text: "a1" }] },
+      { role: "user", content: [{ type: "tool_result", tool_use_id: "t", content: "r", cache_control: mark }] },
+    ],
+  };
+  claudeCli.capCacheBreakpoints(payload);
+  assert.equal(JSON.stringify(payload).split("cache_control").length - 1, 4);
+  assert.equal((payload.messages[0]!.content[0]! as Block).cache_control, undefined);
+  assert.deepEqual((payload.messages[2]!.content[0]! as Block).cache_control, mark);
+  assert.deepEqual(payload.tools[1]!.cache_control, mark);
+});
+
+test("cache marker cap preserves schema properties, tool inputs and nested tool content", () => {
+  const mark = { type: "ephemeral", ttl: "1h" };
+  const schema = { type: "object", properties: { cache_control: { type: "string" } } };
+  const input = { cache_control: "user value", nested: { cache_control: "nested value" } };
+  const content = [{ type: "text", text: "result", cache_control: "tool data" }];
+  const payload = {
+    tools: [{ name: "a", input_schema: schema, cache_control: mark }],
+    system: [{ type: "text", text: "s1", cache_control: mark }, { type: "text", text: "s2", cache_control: mark }],
+    messages: [
+      { role: "assistant", content: [{ type: "tool_use", id: "t", name: "a", input, cache_control: mark }] },
+      { role: "user", content: [{ type: "tool_result", tool_use_id: "t", content, cache_control: mark }] },
+    ],
+  };
+  const dataBefore = structuredClone({ schema, input, content });
+  claudeCli.capCacheBreakpoints(payload);
+  assert.deepEqual({ schema, input, content }, dataBefore);
+  assert.equal((payload.messages[0]!.content[0]! as Block).cache_control, undefined);
+  assert.deepEqual(payload.tools[0]!.cache_control, mark);
+  assert.deepEqual(payload.system.map((block) => block.cache_control), [mark, mark]);
+  assert.deepEqual(payload.messages.at(-1)!.content[0]!.cache_control, mark);
+});
+
+test("normal requests with four or fewer markers are byte-unchanged", () => {
+  const mark = { type: "ephemeral", ttl: "1h" };
+  const payload = {
+    system: [{ type: "text", text: "s", cache_control: mark }],
+    messages: [{ role: "user", content: [{ type: "text", text: "u", cache_control: mark }] }],
+  };
+  const before = JSON.stringify(payload);
+  claudeCli.capCacheBreakpoints(payload);
+  assert.equal(JSON.stringify(payload), before);
+});
+
+test("rewriteInitialRequest never emits five markers (tools + 2 system + system message + final)", () => {
+  const mark = { type: "ephemeral", ttl: "1h" };
+  const canonical = [{ type: "text", text: "inspect" }];
+  const body = {
+    tools: [{ name: "a", cache_control: mark }],
+    system: [{ type: "text", text: "s1", cache_control: mark }, { type: "text", text: "s2", cache_control: mark }],
+    messages: [
+      { role: "user", content: canonical },
+      { role: "system", content: [{ type: "text", text: "env", cache_control: mark }] },
+      { role: "assistant", content: [{ type: "text", text: "r" }] },
+      { role: "user", content: [{ type: "text", text: "next" }] },
+    ],
+  };
+  const frames: NativeFrame[] = body.messages.filter((message) => message.role !== "system").map((message) => ({
+    type: message.role as "user" | "assistant",
+    message: { role: message.role as "user" | "assistant", content: message.content },
+  }));
+  const out = rewriteInitialRequest(Buffer.from(JSON.stringify(body)), frames, body.messages.slice(1, 2));
+  assert.equal(out.toString("utf8").split("cache_control").length - 1, 4);
+  const parsed = JSON.parse(out.toString("utf8"));
+  assert.deepEqual(parsed.messages.at(-1).content.at(-1).cache_control, mark);
 });

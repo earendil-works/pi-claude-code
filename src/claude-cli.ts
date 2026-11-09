@@ -847,6 +847,37 @@ function normalizeLeadingSystemCache(system: unknown): void {
   }
 }
 
+const MAX_CACHE_BREAKPOINTS = 4;
+
+function collectCacheMarkers(blocks: unknown, out: Record<string, unknown>[]): void {
+  if (!Array.isArray(blocks)) return;
+  // Only direct API block markers count; schemas, tool inputs and nested content are user data.
+  for (const block of blocks) {
+    if (block && typeof block === "object" && block.cache_control !== undefined) out.push(block);
+  }
+}
+
+/**
+ * Anthropic rejects requests with more than four cache_control blocks ("Found 5").
+ * Final pass over the outgoing request: keep tools/system prefix markers and the
+ * latest message marker, dropping the oldest message markers first.
+ */
+export function capCacheBreakpoints(payload: { messages?: unknown; system?: unknown; tools?: unknown }): void {
+  const fixed: Record<string, unknown>[] = [];
+  collectCacheMarkers(payload.tools, fixed);
+  collectCacheMarkers(payload.system, fixed);
+  const inMessages: Record<string, unknown>[] = [];
+  if (Array.isArray(payload.messages)) {
+    for (const message of payload.messages) {
+      if (message && typeof message === "object") collectCacheMarkers(message.content, inMessages);
+    }
+  }
+  let excess = fixed.length + inMessages.length - MAX_CACHE_BREAKPOINTS;
+  for (let i = 0; excess > 0 && i < inMessages.length - 1; i++, excess--) delete inMessages[i]!.cache_control;
+  // Prefix markers only go if even tools+system alone exceed the limit; drop the latest first.
+  for (let i = fixed.length - 1; excess > 0 && i >= 0; i--, excess--) delete fixed[i]!.cache_control;
+}
+
 export function rewriteInitialRequest(
   body: Buffer,
   frames: NativeFrame[],
@@ -885,6 +916,7 @@ export function rewriteInitialRequest(
     normalizeLeadingSystemCache(payload.system);
   }
   if (initialSystemMessages?.length || nativeSystemInjections) setReplayCacheBreakpoints(messages!);
+  capCacheBreakpoints(payload);
 
   return Buffer.from(JSON.stringify(payload));
 }
