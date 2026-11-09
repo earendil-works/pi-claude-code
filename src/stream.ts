@@ -154,6 +154,8 @@ function nativeContent(content: NativeContentBlock[]): AssistantMessage["content
   return converted;
 }
 
+const START_EVENT = { text: "text_start", thinking: "thinking_start", toolCall: "toolcall_start" } as const;
+
 class EventTranslator {
   private readonly nativeToContent = new Map<number, number>();
   private sawContentEvent = false;
@@ -223,37 +225,13 @@ class EventTranslator {
     this.sawContentEvent = true;
     const contentIndex = this.output.content.length;
     this.nativeToContent.set(nativeIndex, contentIndex);
-    if (native.type === "text") {
-      this.output.content.push({ type: "text", text: native.text ?? "", nativeIndex } as IndexedText);
-      this.stream.push({ type: "text_start", contentIndex, partial: this.output });
-    } else if (native.type === "thinking") {
-      this.output.content.push({
-        type: "thinking",
-        thinking: native.thinking ?? "",
-        thinkingSignature: native.signature ?? "",
-        nativeIndex,
-      } as IndexedThinking);
-      this.stream.push({ type: "thinking_start", contentIndex, partial: this.output });
-    } else if (native.type === "redacted_thinking") {
-      this.output.content.push({
-        type: "thinking",
-        thinking: "[Reasoning redacted]",
-        thinkingSignature: native.data,
-        redacted: true,
-        nativeIndex,
-      } as IndexedThinking);
-      this.stream.push({ type: "thinking_start", contentIndex, partial: this.output });
-    } else if (native.type === "tool_use") {
-      this.output.content.push({
-        type: "toolCall",
-        id: native.id,
-        name: piToolName(native.name),
-        arguments: (native.input ?? {}) as ToolCall["arguments"],
-        nativeIndex,
-        partialJson: "",
-      } as IndexedToolCall);
-      this.stream.push({ type: "toolcall_start", contentIndex, partial: this.output });
-    }
+    // A start event can omit fields the final message always has; deltas fill them in.
+    const [block] = nativeContent([{ text: "", thinking: "", signature: "", input: {}, ...(native as Partial<NativeContentBlock>) } as NativeContentBlock]);
+    if (!block) return;
+    this.output.content.push(
+      (block.type === "toolCall" ? { ...block, nativeIndex, partialJson: "" } : { ...block, nativeIndex }) as IndexedBlock,
+    );
+    this.stream.push({ type: START_EVENT[block.type], contentIndex, partial: this.output });
   }
 
   private delta(nativeIndex: number, delta: Extract<AnthropicStreamEvent, { type: "content_block_delta" }>["delta"]): void {
