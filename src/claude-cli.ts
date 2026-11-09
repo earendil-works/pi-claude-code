@@ -310,6 +310,26 @@ function isDiscoveredModel(value: unknown): value is DiscoveredClaudeModel {
   );
 }
 
+// Shared by discovery and workers: stream-json in and out, with Claude Code's own tools, settings,
+// slash commands, permission prompts and session files turned off.
+const ISOLATED_STREAM_ARGS = [
+  "-p",
+  "--input-format",
+  "stream-json",
+  "--output-format",
+  "stream-json",
+  "--verbose",
+  "--tools",
+  "",
+  "--setting-sources",
+  "",
+  "--strict-mcp-config",
+  "--disable-slash-commands",
+  "--permission-mode",
+  "dontAsk",
+  "--no-session-persistence",
+];
+
 /** Ask the installed Claude Code process for the account's selectable model catalog. */
 export async function discoverClaudeModels(
   envInput: Record<string, string | undefined> = process.env,
@@ -322,25 +342,11 @@ export async function discoverClaudeModels(
   if (!command) throw new Error(INSTALL_HINT);
 
   const args = [
-    "-p",
-    "--input-format",
-    "stream-json",
-    "--output-format",
-    "stream-json",
-    "--verbose",
+    ...ISOLATED_STREAM_ARGS,
     "--model",
     "default",
-    "--tools",
-    "",
-    "--setting-sources",
-    "",
-    "--strict-mcp-config",
-    "--disable-slash-commands",
-    "--permission-mode",
-    "dontAsk",
     "--permission-prompts",
     "none",
-    "--no-session-persistence",
     "--mcp-config",
     JSON.stringify({ mcpServers: {} }),
   ];
@@ -998,30 +1004,16 @@ class ClaudeProcess {
         },
       };
       const args = [
-        "-p",
+        ...ISOLATED_STREAM_ARGS,
         "--model",
         input.model,
-        "--input-format",
-        "stream-json",
-        "--output-format",
-        "stream-json",
-        "--verbose",
         "--include-partial-messages",
-        "--tools",
-        "",
         "--system-prompt-file",
         systemPath,
         "--settings",
         settingsPath,
-        "--setting-sources",
-        "",
-        "--strict-mcp-config",
-        "--disable-slash-commands",
         "--max-turns",
         "1",
-        "--permission-mode",
-        "dontAsk",
-        "--no-session-persistence",
         "--mcp-config",
         JSON.stringify(mcp),
       ];
