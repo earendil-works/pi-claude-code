@@ -40,9 +40,8 @@ test("relays one upstream Messages request and captures its SSE response", async
   });
   const upstreamPort = await listen(upstream);
   const observed: string[] = [];
-  const relay = new TurnRelay(
-    `http://127.0.0.1:${upstreamPort}`,
-    5_000,
+  const relay = new TurnRelay(`http://127.0.0.1:${upstreamPort}`, 5_000);
+  relay.beginTurn(
     (event) => observed.push(event.type),
     (body) => Buffer.from(JSON.stringify({ ...JSON.parse(body.toString("utf8")), rewritten: true })),
     ["native-tools-test"],

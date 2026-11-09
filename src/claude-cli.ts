@@ -33,7 +33,6 @@ export interface ClaudeStatus {
   loggedIn: boolean;
   /** True when Claude Code reports a Claude Pro/Max-style subscription login. */
   subscription: boolean;
-  authMethod?: string;
   plan?: string;
   detail?: string;
   command?: string;
@@ -69,9 +68,7 @@ export interface RunClaudeInput {
 
 export interface RunClaudeOutput {
   message: NativeMessage;
-  result: NativeResult;
   usage: NativeUsage;
-  exitCode: number;
   relay: {
     upstreamRequests: number;
     blockedRequests: number;
@@ -264,7 +261,6 @@ export async function getClaudeStatus(
     loggedIn,
     subscription: loggedIn && !!plan,
     command,
-    authMethod: typeof payload.authMethod === "string" ? payload.authMethod : undefined,
     plan,
     detail: loggedIn ? undefined : LOGIN_HINT,
   };
@@ -314,6 +310,26 @@ function isDiscoveredModel(value: unknown): value is DiscoveredClaudeModel {
   );
 }
 
+// Shared by discovery and workers: stream-json in and out, with Claude Code's own tools, settings,
+// slash commands, permission prompts and session files turned off.
+const ISOLATED_STREAM_ARGS = [
+  "-p",
+  "--input-format",
+  "stream-json",
+  "--output-format",
+  "stream-json",
+  "--verbose",
+  "--tools",
+  "",
+  "--setting-sources",
+  "",
+  "--strict-mcp-config",
+  "--disable-slash-commands",
+  "--permission-mode",
+  "dontAsk",
+  "--no-session-persistence",
+];
+
 /** Ask the installed Claude Code process for the account's selectable model catalog. */
 export async function discoverClaudeModels(
   envInput: Record<string, string | undefined> = process.env,
@@ -326,25 +342,11 @@ export async function discoverClaudeModels(
   if (!command) throw new Error(INSTALL_HINT);
 
   const args = [
-    "-p",
-    "--input-format",
-    "stream-json",
-    "--output-format",
-    "stream-json",
-    "--verbose",
+    ...ISOLATED_STREAM_ARGS,
     "--model",
     "default",
-    "--tools",
-    "",
-    "--setting-sources",
-    "",
-    "--strict-mcp-config",
-    "--disable-slash-commands",
-    "--permission-mode",
-    "dontAsk",
     "--permission-prompts",
     "none",
-    "--no-session-persistence",
     "--mcp-config",
     JSON.stringify({ mcpServers: {} }),
   ];
@@ -836,17 +838,6 @@ function injectNativeSystemMessages(
   return output;
 }
 
-function normalizeLeadingSystemCache(system: unknown): void {
-  if (!Array.isArray(system)) return;
-  for (const block of system) {
-    if (block && typeof block === "object") delete (block as Record<string, unknown>).cache_control;
-  }
-  const last = system.at(-1);
-  if (last && typeof last === "object") {
-    (last as Record<string, unknown>).cache_control = { type: "ephemeral", ttl: "1h" };
-  }
-}
-
 export function rewriteInitialRequest(
   body: Buffer,
   frames: NativeFrame[],
@@ -882,7 +873,7 @@ export function rewriteInitialRequest(
   if (nativeSystemInjections) {
     messages = injectNativeSystemMessages(messages!, nativeSystemInjections);
     payload.messages = messages;
-    normalizeLeadingSystemCache(payload.system);
+    if (Array.isArray(payload.system)) setCacheBreakpoint({ content: payload.system });
   }
   if (initialSystemMessages?.length || nativeSystemInjections) setReplayCacheBreakpoints(messages!);
 
@@ -952,17 +943,33 @@ class ClaudeProcess {
   private closed = false;
   private delivered = false;
   private stderr = "";
+  readonly fingerprint: string;
+  private readonly root: string;
+  private readonly child: ChildProcess;
+  private readonly relay: TurnRelay;
+  private readonly queue: AsyncQueue<NativeOutputEvent>;
+  private readonly readTask: Promise<void>;
+  private readonly exitOutcome: Promise<{ code?: number; error?: Error }>;
+  private readonly timeoutMs: number;
 
   private constructor(
-    readonly fingerprint: string,
-    private readonly root: string,
-    private readonly child: ChildProcess,
-    private readonly relay: TurnRelay,
-    private readonly queue: AsyncQueue<NativeOutputEvent>,
-    private readonly readTask: Promise<void>,
-    private readonly exitOutcome: Promise<{ code?: number; error?: Error }>,
-    private readonly timeoutMs: number,
+    fingerprint: string,
+    root: string,
+    child: ChildProcess,
+    relay: TurnRelay,
+    queue: AsyncQueue<NativeOutputEvent>,
+    readTask: Promise<void>,
+    exitOutcome: Promise<{ code?: number; error?: Error }>,
+    timeoutMs: number,
   ) {
+    this.fingerprint = fingerprint;
+    this.root = root;
+    this.child = child;
+    this.relay = relay;
+    this.queue = queue;
+    this.readTask = readTask;
+    this.exitOutcome = exitOutcome;
+    this.timeoutMs = timeoutMs;
     child.stderr?.setEncoding("utf8");
     child.stderr?.on("data", (chunk: string) => (this.stderr = (this.stderr + chunk).slice(-65_536)));
   }
@@ -997,30 +1004,16 @@ class ClaudeProcess {
         },
       };
       const args = [
-        "-p",
+        ...ISOLATED_STREAM_ARGS,
         "--model",
         input.model,
-        "--input-format",
-        "stream-json",
-        "--output-format",
-        "stream-json",
-        "--verbose",
         "--include-partial-messages",
-        "--tools",
-        "",
         "--system-prompt-file",
         systemPath,
         "--settings",
         settingsPath,
-        "--setting-sources",
-        "",
-        "--strict-mcp-config",
-        "--disable-slash-commands",
         "--max-turns",
         "1",
-        "--permission-mode",
-        "dontAsk",
-        "--no-session-persistence",
         "--mcp-config",
         JSON.stringify(mcp),
       ];
@@ -1057,7 +1050,6 @@ class ClaudeProcess {
       );
       return new ClaudeProcess(plan.fingerprint, root, child, relay, queue, readTask, exitOutcome, plan.timeoutMs);
     } catch (error) {
-      relay?.abort();
       if (child && child.exitCode === null) killProcessTree(child);
       await relay?.close();
       await rm(root, { recursive: true, force: true });
@@ -1131,7 +1123,7 @@ class ClaudeProcess {
     );
 
     const abort = () => {
-      this.relay.abort();
+      this.relay.finishTurn();
       this.closeNow();
     };
     input.signal?.addEventListener("abort", abort, { once: true });
@@ -1241,9 +1233,7 @@ class ClaudeProcess {
 
       return {
         message,
-        result,
         usage,
-        exitCode: this.child.exitCode ?? 0,
         relay: {
           upstreamRequests: Number(this.relay.used),
           blockedRequests: this.relay.denied,
@@ -1269,7 +1259,7 @@ class ClaudeProcess {
     if (this.closed) return;
     this.closed = true;
     this.clearExpiryTimer();
-    this.relay.abort();
+    this.relay.finishTurn();
     if (this.child.exitCode === null) killProcessTree(this.child);
   }
 

@@ -22,10 +22,15 @@ export interface DiscoveredClaudeModel {
 const BUILTIN_ANTHROPIC_MODELS: Record<string, Model<"anthropic-messages">> = Object.fromEntries(
   getBuiltinModels("anthropic").map((model) => [model.id, model]),
 );
-const NATIVE_ROUTE_BY_ID = new Map<string, string>();
-const NATIVE_TOOL_CHANGES_BY_ID = new Map<string, boolean>();
-const ADAPTIVE_THINKING_BY_ID = new Map<string, boolean>();
-const DISABLED_THINKING_BY_ID = new Map<string, boolean>();
+
+/** What Claude Code's catalog and Pi's built-in models say about each discovered model id. */
+interface ModelTraits {
+  route: string;
+  nativeToolChanges: boolean;
+  adaptiveThinking: boolean;
+  disabledThinking: boolean;
+}
+const TRAITS_BY_ID = new Map<string, ModelTraits>();
 
 const FALLBACK_DISCOVERY: DiscoveredClaudeModel[] = [
   {
@@ -138,22 +143,21 @@ export function modelFromDiscovery(info: DiscoveredClaudeModel): ClaudeCodeModel
   const id = canonicalModelId(info);
   const builtinId = id === "default" ? withoutContextSuffix(info.resolvedModel || "") : id;
   const builtin = BUILTIN_ANTHROPIC_MODELS[builtinId];
-  NATIVE_ROUTE_BY_ID.set(id, info.value);
-  NATIVE_TOOL_CHANGES_BY_ID.set(id, builtin?.compat?.supportsMidConvoToolChanges === true);
-  ADAPTIVE_THINKING_BY_ID.set(id, info.supportsAdaptiveThinking === true);
-  DISABLED_THINKING_BY_ID.set(
-    id,
+  TRAITS_BY_ID.set(id, {
+    route: info.value,
+    nativeToolChanges: builtin?.compat?.supportsMidConvoToolChanges === true,
+    adaptiveThinking: info.supportsAdaptiveThinking === true,
     // Pi marks models that reject `thinking.type: disabled` with `off: null`. Unknown
     // adaptive models are assumed to be newer and therefore unable to disable thinking.
-    builtin ? builtin.thinkingLevelMap?.off !== null : info.supportsAdaptiveThinking !== true,
-  );
+    disabledThinking: builtin ? builtin.thinkingLevelMap?.off !== null : info.supportsAdaptiveThinking !== true,
+  });
   return builtin ? fromBuiltin(info, id, builtin) : fallbackModel(info, id);
 }
 
 export const CLAUDE_CODE_MODELS: ClaudeCodeModel[] = FALLBACK_DISCOVERY.map(modelFromDiscovery);
 
 export function nativeModel(model: string): string {
-  const direct = NATIVE_ROUTE_BY_ID.get(model);
+  const direct = TRAITS_BY_ID.get(model)?.route;
   if (direct) return direct;
   if (model === "default") return model;
   const canonical = canonicalRoute(model);
@@ -165,33 +169,28 @@ function canonicalRoute(model: string): string {
   return ALIASES[withoutSuffix] ?? withoutSuffix;
 }
 
+/** Traits recorded for this exact id, else for its canonical route. */
+function knownTraits(model: string): ModelTraits | undefined {
+  return TRAITS_BY_ID.get(model) ?? TRAITS_BY_ID.get(canonicalRoute(model));
+}
+
 /** Whether Claude Code reports adaptive thinking for this model. Unknown models are assumed to support it. */
 export function supportsAdaptiveThinking(model: string): boolean {
-  const canonical = canonicalRoute(model);
-  return ADAPTIVE_THINKING_BY_ID.get(model) ?? ADAPTIVE_THINKING_BY_ID.get(canonical) ?? true;
+  return knownTraits(model)?.adaptiveThinking ?? true;
 }
 
 /** Whether the API accepts `thinking: { type: "disabled" }` for this model. */
 export function supportsDisabledThinking(model: string): boolean {
-  const canonical = canonicalRoute(model);
-  const known = DISABLED_THINKING_BY_ID.get(model) ?? DISABLED_THINKING_BY_ID.get(canonical);
+  const known = knownTraits(model)?.disabledThinking;
   if (known !== undefined) return known;
-  const builtin = BUILTIN_ANTHROPIC_MODELS[canonical];
+  const builtin = BUILTIN_ANTHROPIC_MODELS[canonicalRoute(model)];
   return builtin ? builtin.thinkingLevelMap?.off !== null : !supportsAdaptiveThinking(model);
 }
 
 /** Whether Anthropic currently accepts native mid-conversation tool blocks for this route. */
 export function supportsNativeToolChanges(model: string): boolean {
-  const canonical = canonicalRoute(model);
   return (
-    NATIVE_TOOL_CHANGES_BY_ID.get(model) ??
-    NATIVE_TOOL_CHANGES_BY_ID.get(canonical) ??
-    BUILTIN_ANTHROPIC_MODELS[canonical]?.compat?.supportsMidConvoToolChanges === true
+    knownTraits(model)?.nativeToolChanges ??
+    BUILTIN_ANTHROPIC_MODELS[canonicalRoute(model)]?.compat?.supportsMidConvoToolChanges === true
   );
-}
-
-export function modelForDiscoveredRoute(route: string, label?: string): ClaudeCodeModel | undefined {
-  const canonical = withoutContextSuffix(ALIASES[withoutContextSuffix(route)] ?? route);
-  const known = CLAUDE_CODE_MODELS.find((model) => model.id === canonical);
-  return known ? { ...known, name: label ? `${label} (Claude Code)` : known.name } : undefined;
 }

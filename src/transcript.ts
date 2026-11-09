@@ -88,10 +88,6 @@ export function prepareMessages(messages: Message[], model: Model<any>): Message
   });
 }
 
-function clone<T>(value: T): T {
-  return structuredClone(value);
-}
-
 function assistantProjection(message: AssistantMessage): AssistantProjection {
   const text = message.content
     .filter((block): block is TextContent => block.type === "text")
@@ -100,7 +96,7 @@ function assistantProjection(message: AssistantMessage): AssistantProjection {
     .trim();
   const toolCalls = message.content
     .filter((block) => block.type === "toolCall")
-    .map((block) => ({ id: block.id, name: block.name, input: clone(block.arguments) as Record<string, unknown> }));
+    .map((block) => ({ id: block.id, name: block.name, input: structuredClone(block.arguments) as Record<string, unknown> }));
   return { text, toolCalls };
 }
 
@@ -121,7 +117,7 @@ export function getInitialSystemMessages(messages: Message[]): unknown[] | undef
     const message = messages[index];
     if (message?.role !== "assistant") continue;
     const value = replayCarrier(message)?.initialSystemMessages;
-    if (value) return clone(value);
+    if (value) return structuredClone(value);
   }
   return undefined;
 }
@@ -179,7 +175,7 @@ function canonicalAssistantContent(message: AssistantMessage): NativeContentBloc
         type: "tool_use",
         id: block.id,
         name: `${TOOL_PREFIX}${block.name}`,
-        input: clone(block.arguments) as Record<string, unknown>,
+        input: structuredClone(block.arguments) as Record<string, unknown>,
       });
     }
   }
@@ -189,7 +185,7 @@ function canonicalAssistantContent(message: AssistantMessage): NativeContentBloc
 function assistantContent(message: AssistantMessage): NativeContentBlock[] {
   const carrier = replayCarrier(message);
   if (carrier && projectionsEqual(assistantProjection(message), carrier.projection)) {
-    return clone(carrier.message.content);
+    return structuredClone(carrier.message.content);
   }
 
   // A changed projection must not restore stale signed thinking. For messages
@@ -296,7 +292,6 @@ export interface ToolManifestEntry {
 export function prepareTools(tools: Tool[]): {
   manifest: ToolManifestEntry[];
   nativeTools: Array<Record<string, unknown>>;
-  names: Set<string>;
 } {
   const names = new Set<string>();
   const manifest: ToolManifestEntry[] = [];
@@ -315,7 +310,7 @@ export function prepareTools(tools: Tool[]): {
       input_schema: schema,
     });
   }
-  return { manifest, nativeTools, names };
+  return { manifest, nativeTools };
 }
 
 function nativeSystemBlocks(message: SystemMessage): Array<Record<string, unknown>> {
@@ -423,9 +418,9 @@ export function makeReplayDiagnostic(
     details: {
       carrier: {
         version: 1,
-        message: clone(message),
+        message: structuredClone(message),
         projection: assistantProjection(output),
-        ...(initialSystemMessages ? { initialSystemMessages: clone(initialSystemMessages) } : {}),
+        ...(initialSystemMessages ? { initialSystemMessages: structuredClone(initialSystemMessages) } : {}),
       },
     },
   };
