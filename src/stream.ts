@@ -28,7 +28,8 @@ import {
   prepareMessages,
   prepareNativeTranscript,
   prepareTools,
-  TOOL_PREFIX,
+  canonicalizeToolUseNames,
+  resolveToolName,
 } from "./transcript.ts";
 
 interface IndexedText {
@@ -122,14 +123,7 @@ function comparableContent(content: AssistantMessage["content"]): unknown[] {
   });
 }
 
-// Claude can name a tool that Pi never declared. Pi's agent loop answers that
-// with a "not found" tool result the model can recover from, so the name passes
-// through rather than failing the turn.
-function piToolName(nativeName: string): string {
-  return nativeName.startsWith(TOOL_PREFIX) ? nativeName.slice(TOOL_PREFIX.length) : nativeName;
-}
-
-function nativeContent(content: NativeContentBlock[]): AssistantMessage["content"] {
+function nativeContent(content: NativeContentBlock[], toolNames: Set<string>): AssistantMessage["content"] {
   const converted: AssistantMessage["content"] = [];
   for (const block of content) {
     if (block.type === "text") {
@@ -148,7 +142,7 @@ function nativeContent(content: NativeContentBlock[]): AssistantMessage["content
         redacted: true,
       });
     } else if (block.type === "tool_use") {
-      converted.push({ type: "toolCall", id: block.id, name: piToolName(block.name), arguments: block.input as never });
+      converted.push({ type: "toolCall", id: block.id, name: resolveToolName(block.name, toolNames).name, arguments: block.input as never });
     }
   }
   return converted;
@@ -162,6 +156,7 @@ class EventTranslator {
     private readonly model: Model<any>,
     private readonly output: AssistantMessage,
     private readonly stream: AssistantMessageEventStream,
+    private readonly toolNames: Set<string>,
   ) {}
 
   event(event: AnthropicStreamEvent): void {
@@ -197,7 +192,8 @@ class EventTranslator {
     usage: NativeUsage,
     initialSystemMessages?: unknown[],
   ): void {
-    const authoritative = nativeContent(message.content);
+    canonicalizeToolUseNames(message, this.toolNames);
+    const authoritative = nativeContent(message.content, this.toolNames);
     if (!this.sawContentEvent) {
       this.emitComplete(authoritative);
     } else if (JSON.stringify(comparableContent(this.output.content)) !== JSON.stringify(comparableContent(authoritative))) {
@@ -244,7 +240,7 @@ class EventTranslator {
       this.output.content.push({
         type: "toolCall",
         id: native.id,
-        name: piToolName(native.name),
+        name: resolveToolName(native.name, this.toolNames).name,
         arguments: (native.input ?? {}) as ToolCall["arguments"],
         nativeIndex,
         partialJson: "",
@@ -367,7 +363,7 @@ export function streamClaudeCode(
         nativeTranscript?.requestTools ?? preparedTools.nativeTools,
         options,
       );
-      const translator = new EventTranslator(model, output, stream);
+      const translator = new EventTranslator(model, output, stream, new Set(tools.map((tool) => tool.name)));
 
       stream.push({ type: "start", partial: output });
       const response = await runClaudeRequest({

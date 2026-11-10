@@ -1118,11 +1118,17 @@ class ClaudeProcess {
     input.signal?.throwIfAborted();
 
     let sawMessageStop = false;
+    let consumerError: { error: unknown } | undefined;
     this.delivered = false;
     const deliver = (event: AnthropicStreamEvent) => {
       this.delivered = true;
       if (event.type === "message_stop") sawMessageStop = true;
-      input.onEvent?.(event);
+      try {
+        input.onEvent?.(event);
+      } catch (error) {
+        consumerError ??= { error };
+        throw error;
+      }
     };
     this.relay.beginTurn(
       deliver,
@@ -1181,6 +1187,7 @@ class ClaudeProcess {
       }
       await this.relay.settled();
       input.signal?.throwIfAborted();
+      if (consumerError) throw consumerError.error;
 
       let message: NativeMessage | undefined;
       if (this.relay.used) {
@@ -1253,6 +1260,9 @@ class ClaudeProcess {
           input.initialSystemMessages ?? deriveInitialSystemMessages(this.relay.originalRequestBody),
         rateLimit,
       };
+    } catch (error) {
+      // The relay records callback throws as capture failures; preserve the original consumer error.
+      throw consumerError ? consumerError.error : error;
     } finally {
       input.signal?.removeEventListener("abort", abort);
       this.relay.finishTurn();
