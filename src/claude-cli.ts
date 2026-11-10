@@ -39,7 +39,7 @@ export interface ClaudeStatus {
   command?: string;
   /**
    * Set when `claude auth status` could not be spawned, exited without a JSON
-   * payload, or returned unparsable JSON. A genuine logout leaves this unset.
+   * payload, or returned JSON without a boolean loggedIn. A genuine logout leaves this unset.
    */
   diagnostic?: boolean;
 }
@@ -183,10 +183,19 @@ export async function captureProcess(
 
   const abort = () => killProcessTree(child);
   signal?.addEventListener("abort", abort, { once: true });
-  const timer = setTimeout(abort, timeoutMs);
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    abort();
+  }, timeoutMs);
   try {
-    const code = await childExit(child);
+    const code = await childExit(child).catch((error: unknown) => {
+      signal?.throwIfAborted();
+      if (timedOut) throw new Error(`timed out after ${timeoutMs}ms`);
+      throw error;
+    });
     signal?.throwIfAborted();
+    if (timedOut) throw new Error(`timed out after ${timeoutMs}ms`);
     return { code, stdout, stderr };
   } finally {
     clearTimeout(timer);
@@ -220,6 +229,7 @@ function statusPayload(stdout: string): Record<string, unknown> | undefined {
 export async function getClaudeStatus(
   envInput: Record<string, string | undefined> = process.env,
   signal?: AbortSignal,
+  timeoutMs = 20_000,
 ): Promise<ClaudeStatus> {
   const env = claudeEnvironment(envInput);
   const command = await resolveClaudeExecutable(env);
@@ -227,7 +237,7 @@ export async function getClaudeStatus(
 
   let result: { code: number; stdout: string; stderr: string };
   try {
-    result = await captureProcess(command, ["auth", "status"], env, signal);
+    result = await captureProcess(command, ["auth", "status"], env, signal, timeoutMs);
   } catch (error) {
     if (signal?.aborted) throw error;
     const message = error instanceof Error ? error.message : String(error);
@@ -255,8 +265,20 @@ export async function getClaudeStatus(
     };
   }
 
+  if (typeof payload.loggedIn !== "boolean") {
+    // The JSON may contain account details, so do not echo it in the diagnostic.
+    return {
+      available: true,
+      loggedIn: false,
+      subscription: false,
+      command,
+      diagnostic: true,
+      detail: `Claude Code status check failed (exit ${result.code}): unexpected auth status output (no boolean loggedIn field)`,
+    };
+  }
+
   // Claude Code reports a logout as JSON with `loggedIn: false`, sometimes with
-  // a non-zero exit code. Only a JSON payload is authoritative for login state.
+  // a non-zero exit code. Only a boolean loggedIn field is authoritative for login state.
   const loggedIn = payload.loggedIn === true;
   const plan = typeof payload.subscriptionType === "string" ? payload.subscriptionType : undefined;
   return {
