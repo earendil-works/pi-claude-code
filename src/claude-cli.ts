@@ -1140,6 +1140,7 @@ class ClaudeProcess {
     let nativeError: string | undefined;
     let turnUuid: string | undefined;
     let rateLimit: RateLimitInfo | undefined;
+    const trace: string[] = [];
 
     try {
       const frames = continuation ? input.frames.slice(-1) : input.frames;
@@ -1163,7 +1164,13 @@ class ClaudeProcess {
 
       for (;;) {
         const event = await this.queue.next(input.signal, this.timeoutMs);
-        if (!event) throw await this.exitError("Claude Code exited before completing its response");
+        if (!event) {
+          const error = await this.exitError("Claude Code exited before completing its response");
+          throw new IncompleteClaudeResponse(error.message);
+        }
+        if (trace.length < 12) {
+          trace.push(event.type === "result" ? `result:${event.subtype ?? "?"}${event.is_error ? "!" : ""}` : event.type);
+        }
         if (event.type === "assistant") {
           const error = nativeErrorText(event);
           if (error !== undefined) nativeError = error;
@@ -1194,11 +1201,11 @@ class ClaudeProcess {
           // only retry left. Word transient failures so it recognizes them.
           if (this.relay.status === 200 && !this.relay.capture.complete && !upstreamError) {
             // A dropped stream with no upstream error is a transport failure.
-            throw new Error(`Claude Code upstream stream ended before message_stop (${detail})`);
+            throw new IncompleteClaudeResponse(`Claude Code upstream stream ended before message_stop (${detail})`);
           }
           if (this.relay.status === undefined && this.relay.upstreamFailed) {
             // The connection to Anthropic failed before any response status.
-            throw new Error(`Claude Code upstream connection lost before a response (${detail})`);
+            throw new IncompleteClaudeResponse(`Claude Code upstream connection lost before a response (${detail})`);
           }
           if (this.relay.status !== undefined && this.relay.status >= 500) {
             // 5xx such as 529 (overloaded) are transient regardless of the body.
@@ -1215,8 +1222,13 @@ class ClaudeProcess {
       // Native error assistants are not collected; report their text instead of "Incomplete".
       if (!message && nativeError) throw new Error(`Claude Code API error: ${nativeError}`);
       if (!message || !sawMessageStop || !result) {
-        throw new Error(
-          `Incomplete Claude Code response: assistant, message_stop and one result required${this.stderr ? ` (${this.stderr.trim().slice(-500)})` : ""}`,
+        const clues = [
+          this.stderr ? this.stderr.trim().slice(-500) : "",
+          trace.length ? `events: ${trace.join(",")}` : "",
+          `relay ${this.relay.used ? `used, status ${this.relay.status ?? "unknown"}` : "unused"}`,
+        ].filter(Boolean);
+        throw new IncompleteClaudeResponse(
+          `Incomplete Claude Code response: assistant, message_stop and one result required (${clues.join("; ")})`,
         );
       }
 
@@ -1280,6 +1292,9 @@ class ClaudeProcess {
     return new Error(`${fallback} (exit ${outcome.code ?? "unknown"}${detail ? `: ${detail}` : ""})`);
   }
 }
+
+/** A worker ended without a complete response; an undelivered turn can be replayed cold. */
+export class IncompleteClaudeResponse extends Error {}
 
 interface AcquiredProcess {
   worker: ClaudeProcess;
@@ -1389,6 +1404,27 @@ registerSessionResourceCleanup((sessionId) => {
 });
 
 export async function runClaudeRequest(input: RunClaudeInput): Promise<RunClaudeOutput> {
+  let delivered = false;
+  const once = {
+    ...input,
+    onEvent: input.onEvent
+      ? (event: AnthropicStreamEvent) => {
+          delivered = true;
+          input.onEvent!(event);
+        }
+      : undefined,
+  };
+  try {
+    return await runClaudeRequestOnce(once);
+  } catch (error) {
+    if (!(error instanceof IncompleteClaudeResponse) || input.signal?.aborted || delivered) throw error;
+    // The failed attempt already discarded its own worker; do not disturb other sessions.
+    readyStatusCache.clear();
+    return runClaudeRequestOnce(input);
+  }
+}
+
+async function runClaudeRequestOnce(input: RunClaudeInput): Promise<RunClaudeOutput> {
   input.signal?.throwIfAborted();
   const plan = launchPlan(input);
   const acquired = await acquireProcess(input, plan);
@@ -1414,7 +1450,7 @@ export async function runClaudeRequest(input: RunClaudeInput): Promise<RunClaude
     // A warm process can hold stale hidden state. If it failed before streaming
     // or reaching the API, nothing was shown or charged, so replay once on a fresh process.
     if (acquired.continuation && !acquired.worker.startedOutput && !input.signal?.aborted) {
-      return runClaudeRequest(input);
+      return runClaudeRequestOnce(input);
     }
     throw error;
   }
