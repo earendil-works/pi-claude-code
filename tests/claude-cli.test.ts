@@ -552,7 +552,8 @@ for await (const line of input) {
           message: { role: "user", content: [{ type: "text", text: "one" }] },
           shouldQuery: false,
         },
-        { type: "assistant", message: { role: "assistant", content: first.message.content } },
+        // prepareFrames tags replayed turns with their model; that must not break continuation.
+        { type: "assistant", message: { role: "assistant", content: first.message.content, model: "opus" } },
         { type: "user", message: { role: "user", content: [{ type: "text", text: "two" }] } },
       ],
     });

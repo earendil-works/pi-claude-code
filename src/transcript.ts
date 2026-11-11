@@ -212,6 +212,7 @@ export function prepareFrames(messages: Message[]): NativeFrame[] {
 
     let role: "user" | "assistant";
     let blocks: unknown[];
+    let model: string | undefined;
 
     if (message.role === "user") {
       role = "user";
@@ -219,6 +220,8 @@ export function prepareFrames(messages: Message[]): NativeFrame[] {
     } else if (message.role === "assistant") {
       role = "assistant";
       blocks = assistantContent(message);
+      // Claude Code strips signed thinking from replayed turns whose model it can't confirm.
+      model = message.model;
     } else {
       role = "user";
       blocks = [
@@ -236,7 +239,7 @@ export function prepareFrames(messages: Message[]): NativeFrame[] {
     if (role === "user" && previous?.type === "user") {
       previous.message.content.push(...blocks);
     } else {
-      frames.push({ type: role, message: { role, content: blocks } });
+      frames.push({ type: role, message: { role, content: blocks, ...(model && { model }) } });
     }
   }
 

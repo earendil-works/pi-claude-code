@@ -917,7 +917,8 @@ function frameHistoryHash(frames: NativeFrame[]): string {
   return digest(
     frames.map((frame) => ({
       type: frame.type,
-      message: frame.message,
+      // Allowlist: commit() builds its frame without the replay-only model tag; add new frame fields here too.
+      message: { role: frame.message.role, content: frame.message.content },
     })),
   );
 }

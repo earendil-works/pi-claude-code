@@ -37,6 +37,7 @@ export interface NativeFrame {
   message: {
     role: "user" | "assistant";
     content: unknown[];
+    model?: string;
   };
   shouldQuery?: false;
 }
