@@ -64,6 +64,11 @@ test("prepares replay frames and groups tool results", () => {
   assert.equal(frames.length, 3);
   assert.equal(frames[0]?.shouldQuery, false);
   assert.equal(frames[1]?.type, "assistant");
+  // Claude Code strips signed thinking from turns whose model it can't confirm.
+  assert.equal(frames[1]?.message.model, "sonnet");
+  // The model that answered wins over the alias the turn was requested with.
+  const answered = prepareFrames(messages.with(2, { ...assistant, model: "default", responseModel: "claude-opus-5-5" }));
+  assert.equal(answered[1]?.message.model, "claude-opus-5-5");
   assert.equal((frames[1]?.message.content[2] as { name: string }).name, `${TOOL_PREFIX}read`);
   assert.equal(frames[2]?.message.content.length, 2);
   assert.equal(frames[2]?.shouldQuery, undefined);

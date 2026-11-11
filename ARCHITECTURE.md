@@ -77,6 +77,15 @@ tool execution. In particular, it:
   to the original. Workers also disable auto-memory and CLAUDE.md loading, so
   those reminders are not created in the first place. If a request no longer
   lines up with Pi's history, the turn fails rather than sending a guess;
+- relies on replayed assistant frames carrying the model that answered
+  (`responseModel`, recorded from `message_start`, else Pi's stored
+  `message.model`). Claude Code drops signed thinking from replayed turns it
+  cannot attribute to the running model (no tag, `default`, or another
+  model), so without the tag every step re-reasons from scratch. Because the
+  tag passes that filter, `prepareMessages` is the only guard against
+  replaying another model's signatures. Symptom if a future Claude Code
+  changes this: requests carry no thinking in their history and runs take
+  more, smaller steps;
 - records Claude Code's initial native system messages (environment, date),
   then restores their stable layout during full-history replay. It also adjusts
   cache breakpoints so tool rounds do not continually invalidate the

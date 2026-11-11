@@ -29,7 +29,7 @@ for await (const line of input) {
   const usage = {input_tokens: 3, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0};
   const content = [{type: "tool_use", id: "tool_fake", name: "mcp__pi__aggregate_rum_events", input: {query: "*"}}];
   const events = [
-    {type: "message_start", message: {id: "m_fake", role: "assistant", content: [], usage}},
+    {type: "message_start", message: {id: "m_fake", model: "claude-opus-5-6", role: "assistant", content: [], usage}},
     {type: "content_block_start", index: 0, content_block: {type: "tool_use", id: "tool_fake", name: "mcp__pi__aggregate_rum_events", input: {}}},
     {type: "content_block_delta", index: 0, delta: {type: "input_json_delta", partial_json: '{"query":"*"}'}},
     {type: "content_block_stop", index: 0},
@@ -58,6 +58,8 @@ for await (const line of input) {
     );
     const message = await stream.result();
     assert.equal(message.stopReason, "toolUse", message.errorMessage);
+    // Replay tags turns with the model that answered, not the requested alias.
+    assert.equal(message.responseModel, "claude-opus-5-6");
     assert.deepEqual(
       message.content.map((block) => (block.type === "toolCall" ? [block.name, block.arguments] : block.type)),
       [["aggregate_rum_events", { query: "*" }]],

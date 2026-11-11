@@ -168,6 +168,7 @@ class EventTranslator {
     switch (event.type) {
       case "message_start":
         if (event.message.id) this.output.responseId = event.message.id;
+        if (event.message.model && event.message.model !== this.model.id) this.output.responseModel = event.message.model;
         updateUsage(this.output, this.model, event.message.usage);
         break;
       case "content_block_start":

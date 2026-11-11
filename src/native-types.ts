@@ -19,6 +19,7 @@ export interface NativeUsage extends JsonRecord {
 
 export interface NativeMessage extends JsonRecord {
   id?: string;
+  model?: string;
   role: "assistant";
   content: NativeContentBlock[];
   usage?: NativeUsage;
@@ -37,6 +38,7 @@ export interface NativeFrame {
   message: {
     role: "user" | "assistant";
     content: unknown[];
+    model?: string;
   };
   shouldQuery?: false;
 }
