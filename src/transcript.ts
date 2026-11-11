@@ -221,7 +221,8 @@ export function prepareFrames(messages: Message[]): NativeFrame[] {
       role = "assistant";
       blocks = assistantContent(message);
       // Claude Code strips signed thinking from replayed turns whose model it can't confirm.
-      model = message.model;
+      // Prefer the model that answered: aliases like "default" can't be confirmed and may move.
+      model = message.responseModel ?? message.model;
     } else {
       role = "user";
       blocks = [
