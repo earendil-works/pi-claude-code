@@ -801,3 +801,105 @@ test("reports upstream 5xx as retryable and keeps 4xx non-retryable", async () =
   assert.match(invalid.message, /Incomplete Claude Code upstream response \(status 400.*upstream said: bad request/);
   assert.equal(invalid.retryable, false);
 });
+
+test("keeps user text that starts with a slash away from Claude Code's command parser", async () => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), "pi-claude-code-slash-")));
+  const executable = join(root, "fake-claude.mjs");
+  // Like Claude Code 2.1.x: a user text block starting with "/" runs as a
+  // command, even with --disable-slash-commands, and never reaches the model.
+  await writeFile(
+    executable,
+    `#!/usr/bin/env node
+import readline from "node:readline";
+if (process.argv.includes("auth") && process.argv.includes("status")) {
+  console.log(JSON.stringify({loggedIn: true, authMethod: "claude.ai", subscriptionType: "max"}));
+  process.exit(0);
+}
+const input = readline.createInterface({input: process.stdin, crlfDelay: Infinity});
+for await (const line of input) {
+  const frame = JSON.parse(line);
+  if (frame.type !== "user") continue;
+  const ids = {user_message_uuids: [frame.uuid]};
+  const usage = {input_tokens: 1, output_tokens: 1};
+  if (frame.message.content.some(block => block.type === "text" && block.text.startsWith("/"))) {
+    const content = [{type: "text", text: "/btw isn't available in this environment."}];
+    console.log(JSON.stringify({type: "assistant", message: {model: "<synthetic>", role: "assistant", content, usage}}));
+    console.log(JSON.stringify({type: "result", subtype: "success", is_error: false, num_turns: 0, usage, ...ids}));
+    continue;
+  }
+  if (frame.shouldQuery === false) {
+    console.log(JSON.stringify({type: "result", num_turns: 0, ...ids}));
+    continue;
+  }
+  console.log(JSON.stringify({type: "stream_event", event: {type: "message_stop"}}));
+  console.log(JSON.stringify({type: "assistant", message: {id: "m", role: "assistant", content: [{type: "text", text: "ok"}], stop_reason: "end_turn", usage}}));
+  console.log(JSON.stringify({type: "result", subtype: "success", is_error: false, num_turns: 1, usage, ...ids}));
+}
+`,
+    "utf8",
+  );
+  await chmod(executable, 0o755);
+  const content = (...texts: string[]) => texts.map((value) => ({ type: "text", text: value }));
+  try {
+    const result = await runClaudeRequest({
+      model: "sonnet",
+      cwd: root,
+      frames: [
+        { type: "user", message: { role: "user", content: content("/resume old") }, shouldQuery: false },
+        { type: "assistant", message: { role: "assistant", content: content("old reply") } },
+        { type: "user", message: { role: "user", content: content("note", "/btw is this ok?") } },
+      ],
+      systemPrompt: "system",
+      manifest: [],
+      extraBody: { tools: [] },
+      env: { PI_CLAUDE_CODE_COMMAND: executable },
+      timeoutMs: 5_000,
+    });
+    assert.deepEqual(result.message.content, content("ok"));
+  } finally {
+    closeClaudeProcesses();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("reports a reply Claude Code made up without the model", async () => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), "pi-claude-code-synthetic-")));
+  const executable = join(root, "fake-claude.mjs");
+  await writeFile(
+    executable,
+    `#!/usr/bin/env node
+import readline from "node:readline";
+if (process.argv.includes("auth") && process.argv.includes("status")) {
+  console.log(JSON.stringify({loggedIn: true, authMethod: "claude.ai", subscriptionType: "max"}));
+  process.exit(0);
+}
+const input = readline.createInterface({input: process.stdin, crlfDelay: Infinity});
+for await (const line of input) {
+  const frame = JSON.parse(line);
+  const content = [{type: "text", text: "Something isn't available in this environment."}];
+  console.log(JSON.stringify({type: "assistant", message: {model: "<synthetic>", role: "assistant", content}}));
+  console.log(JSON.stringify({type: "result", subtype: "success", is_error: false, num_turns: 0, user_message_uuids: [frame.uuid]}));
+}
+`,
+    "utf8",
+  );
+  await chmod(executable, 0o755);
+  try {
+    await assert.rejects(
+      runClaudeRequest({
+        model: "sonnet",
+        cwd: root,
+        frames: [userFrame("hi")],
+        systemPrompt: "system",
+        manifest: [],
+        extraBody: { tools: [] },
+        env: { PI_CLAUDE_CODE_COMMAND: executable },
+        timeoutMs: 5_000,
+      }),
+      /Claude Code answered without the model: Something isn't available in this environment\./,
+    );
+  } finally {
+    closeClaudeProcesses();
+    await rm(root, { recursive: true, force: true });
+  }
+});

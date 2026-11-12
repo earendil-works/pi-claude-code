@@ -613,13 +613,28 @@ function processEnvironment(
 async function writeFrame(child: ChildProcess, frame: NativeFrame): Promise<string> {
   if (!child.stdin?.writable) throw new Error("Claude Code stdin closed during history replay");
   const uuid = randomUUID();
-  if (!child.stdin.write(`${JSON.stringify({ ...frame, uuid })}\n`)) {
+  if (!child.stdin.write(`${JSON.stringify({ ...withoutSlashCommands(frame), uuid })}\n`)) {
     await new Promise<void>((resolve, reject) => {
       child.stdin!.once("drain", resolve);
       child.stdin!.once("error", reject);
     });
   }
   return uuid;
+}
+
+/**
+ * Claude Code runs a user text block that starts with "/" as a command, even
+ * with --disable-slash-commands, and answers without the model. A leading space
+ * avoids that; rewriteInitialRequest restores Pi's text before the upstream call.
+ */
+function withoutSlashCommands(frame: NativeFrame): NativeFrame {
+  if (frame.type !== "user") return frame;
+  const content = frame.message.content.map((block) =>
+    isBlock(block) && block.type === "text" && typeof block.text === "string" && block.text.startsWith("/")
+      ? { ...block, text: ` ${block.text}` }
+      : block,
+  );
+  return { ...frame, message: { ...frame.message, content } };
 }
 
 /** True when the result names user messages and this turn's frame is not one of them. */
@@ -1214,6 +1229,10 @@ class ClaudeProcess {
 
       // Native error assistants are not collected; report their text instead of "Incomplete".
       if (!message && nativeError) throw new Error(`Claude Code API error: ${nativeError}`);
+      if (message?.model === "<synthetic>") {
+        const text = message.content.flatMap((block) => (block.type === "text" ? [block.text] : [])).join("\n");
+        throw new Error(`Claude Code answered without the model: ${text}`);
+      }
       if (!message || !sawMessageStop || !result) {
         throw new Error(
           `Incomplete Claude Code response: assistant, message_stop and one result required${this.stderr ? ` (${this.stderr.trim().slice(-500)})` : ""}`,
