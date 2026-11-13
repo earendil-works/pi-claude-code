@@ -801,3 +801,30 @@ test("reports upstream 5xx as retryable and keeps 4xx non-retryable", async () =
   assert.match(invalid.message, /Incomplete Claude Code upstream response \(status 400.*upstream said: bad request/);
   assert.equal(invalid.retryable, false);
 });
+
+test("reports a transient upstream stream error as retryable and keeps others non-retryable", async () => {
+  // Anthropic answers 200, starts streaming, then sends an error event instead of message_stop.
+  const streamError = (type: string, message: string) =>
+    failingUpstreamTurn(async (request, response) => {
+      for await (const _chunk of request);
+      response.writeHead(200, { "content-type": "text/event-stream" });
+      const usage = { input_tokens: 2, output_tokens: 0 };
+      response.write(
+        `event: message_start\ndata: ${JSON.stringify({ type: "message_start", message: { id: "m1", role: "assistant", content: [], usage } })}\n\n`,
+      );
+      response.end(`event: error\ndata: ${JSON.stringify({ type: "error", error: { type, message } })}\n\n`);
+    });
+
+  const apiError = await streamError("api_error", "Unable to complete this request right now. Please try again.");
+  assert.match(apiError.message, /upstream server error \(status 200, capture incomplete/);
+  assert.match(apiError.message, /upstream said: api_error: Unable to complete this request/);
+  assert.equal(apiError.retryable, true);
+
+  const overloaded = await streamError("overloaded_error", "Overloaded");
+  assert.match(overloaded.message, /upstream server error \(status 200/);
+  assert.equal(overloaded.retryable, true);
+
+  const invalid = await streamError("invalid_request_error", "bad request");
+  assert.match(invalid.message, /Incomplete Claude Code upstream response \(status 200.*upstream said: invalid_request_error: bad request/);
+  assert.equal(invalid.retryable, false);
+});
