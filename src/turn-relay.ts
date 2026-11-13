@@ -13,6 +13,8 @@ export class AnthropicCapture {
   complete = false;
   /** Error reported inside an otherwise successful (HTTP 200) event stream. */
   error?: string;
+  /** The `error.type` of that stream error, such as `overloaded_error`. */
+  errorType?: string;
   private pending = "";
   private readonly decoder = new TextDecoder();
   private readonly argumentsByIndex = new Map<number, string>();
@@ -88,6 +90,7 @@ export class AnthropicCapture {
         break;
       case "error": {
         const { type, message } = event.error ?? {};
+        this.errorType = type;
         this.error = [type, message].filter(Boolean).join(": ") || "unknown stream error";
         break;
       }

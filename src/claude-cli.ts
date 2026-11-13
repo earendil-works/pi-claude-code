@@ -622,6 +622,12 @@ async function writeFrame(child: ChildProcess, frame: NativeFrame): Promise<stri
   return uuid;
 }
 
+/**
+ * Anthropic error types that stand for a server-side failure (HTTP 500 and 529).
+ * Sent as an error event inside a 200 stream, they are as transient as the status.
+ */
+const SERVER_STREAM_ERROR_TYPES = new Set(["api_error", "overloaded_error"]);
+
 /** True when the result names user messages and this turn's frame is not one of them. */
 function resultIsForAnotherMessage(result: NativeResult, uuid: string): boolean {
   const ids = result.user_message_uuids;
@@ -1200,8 +1206,13 @@ class ClaudeProcess {
             // The connection to Anthropic failed before any response status.
             throw new Error(`Claude Code upstream connection lost before a response (${detail})`);
           }
-          if (this.relay.status !== undefined && this.relay.status >= 500) {
-            // 5xx such as 529 (overloaded) are transient regardless of the body.
+          const streamErrorType = this.relay.capture.errorType;
+          if (
+            (this.relay.status !== undefined && this.relay.status >= 500) ||
+            (streamErrorType !== undefined && SERVER_STREAM_ERROR_TYPES.has(streamErrorType))
+          ) {
+            // 5xx such as 529 (overloaded) are transient regardless of the body, and so
+            // is the same failure reported as an error event in a 200 stream.
             throw new Error(`Claude Code upstream server error (${detail})`);
           }
           throw new Error(`Incomplete Claude Code upstream response (${detail})`);
