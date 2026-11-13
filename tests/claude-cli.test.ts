@@ -15,6 +15,7 @@ import {
 } from "../src/claude-cli.ts";
 import type { NativeFrame } from "../src/native-types.ts";
 import { createClaudeCodeProvider } from "../src/provider.ts";
+import { prepareFrames } from "../src/transcript.ts";
 
 type Block = Record<string, unknown>;
 type WireMessage = { role: string; content: unknown };
@@ -224,6 +225,16 @@ test("refuses requests that do not line up with Pi's history", () => {
       ),
     /lost a tool_result block in user message 1/,
   );
+});
+
+test("accepts a request from which Claude Code dropped blank user text", () => {
+  // An extension notification, then the empty user message that woke the agent.
+  const frames = prepareFrames([
+    { role: "user", content: [{ type: "text", text: "process exited" }], timestamp: 1 },
+    { role: "user", content: [{ type: "text", text: "" }], timestamp: 1 },
+  ]);
+  const wire = [{ role: "user", content: [text("process exited")] }];
+  assert.deepEqual(rewrite(wire, frames), wire);
 });
 
 test("injects native system history at assistant boundaries", () => {
