@@ -138,10 +138,14 @@ function imageBlock(block: ImageContent): Record<string, unknown> {
 }
 
 function userContent(content: string | (TextContent | ImageContent)[]): unknown[] {
-  if (typeof content === "string") return content ? [{ type: "text", text: sanitizeSurrogates(content) }] : [];
-  return content.map((block) =>
-    block.type === "text" ? { type: "text", text: sanitizeSurrogates(block.text) } : imageBlock(block),
-  );
+  // Claude Code drops blank text blocks from user messages, so one kept here
+  // would have no counterpart in its request.
+  if (typeof content === "string") return content.trim() ? [{ type: "text", text: sanitizeSurrogates(content) }] : [];
+  return content
+    .filter((block) => block.type !== "text" || block.text.trim())
+    .map((block) =>
+      block.type === "text" ? { type: "text", text: sanitizeSurrogates(block.text) } : imageBlock(block),
+    );
 }
 
 function toolResultContent(message: ToolResultMessage): string | unknown[] {

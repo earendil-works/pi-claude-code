@@ -69,6 +69,42 @@ test("prepares replay frames and groups tool results", () => {
   assert.equal(frames[2]?.shouldQuery, undefined);
 });
 
+test("drops blank user text that Claude Code would remove from its request", () => {
+  const reply: AssistantMessage = {
+    role: "assistant",
+    api: "test",
+    provider: "other",
+    model: "other",
+    content: [{ type: "text", text: "reply" }],
+    usage,
+    stopReason: "stop",
+    timestamp: 1,
+  };
+  const messages: Message[] = [
+    // An image sent without a prompt.
+    { role: "user", content: [{ type: "text", text: "" }, { type: "image", mimeType: "image/png", data: "AA==" }], timestamp: 1 },
+    reply,
+    // An extension notification, then the bare user message that woke the agent.
+    { role: "user", content: [{ type: "text", text: "process exited" }], timestamp: 2 },
+    { role: "user", content: [{ type: "text", text: "" }], timestamp: 2 },
+    { role: "user", content: " \n", timestamp: 2 },
+    reply,
+    // Text with content keeps its own whitespace.
+    { role: "user", content: " continue\n", timestamp: 3 },
+  ];
+
+  assert.deepEqual(
+    prepareFrames(messages).map((frame) => frame.message.content),
+    [
+      [{ type: "image", source: { type: "base64", media_type: "image/png", data: "AA==" } }],
+      [{ type: "text", text: "reply" }],
+      [{ type: "text", text: "process exited" }],
+      [{ type: "text", text: "reply" }],
+      [{ type: "text", text: " continue\n" }],
+    ],
+  );
+});
+
 test("replays native signed blocks only while the visible projection is unchanged", () => {
   const assistant: AssistantMessage = {
     role: "assistant",
