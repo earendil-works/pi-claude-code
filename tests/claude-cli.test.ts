@@ -329,6 +329,57 @@ test("keeps one breakpoint in a pre-marked multi-block final message (issue #10)
   assert.deepEqual(final.at(-1)?.cache_control, marker);
 });
 
+test("keeps four breakpoints when a system update follows Claude Code's marked user message", () => {
+  // Seen live 2026-11-07: Pi's mid-session "Updated system prompt section" arrives as a
+  // trailing system message after the newest user message, which Claude Code had
+  // already marked. That marker plus the final and previous-query markers made five
+  // ("A maximum of 4 blocks with cache_control may be provided. Found 5.").
+  const marker = { type: "ephemeral", ttl: "1h" };
+  const body = {
+    system: [
+      { type: "text", text: "billing" },
+      { type: "text", text: "identity", cache_control: marker },
+      { type: "text", text: "prompt", cache_control: marker },
+    ],
+    tools: [{ name: "mcp__pi__bash", input_schema: { type: "object" }, cache_control: marker }],
+    messages: [
+      { role: "user", content: [{ type: "text", text: "one" }] },
+      { role: "system", content: [{ type: "text", text: "environment" }] },
+      { role: "assistant", content: [{ type: "text", text: "a1" }] },
+      { role: "user", content: [{ type: "text", text: "two" }] },
+      { role: "assistant", content: [{ type: "text", text: "a2" }] },
+      { role: "user", content: [{ type: "text", text: "three", cache_control: marker }] },
+      { role: "system", content: [{ type: "text", text: "Updated system prompt section" }] },
+    ],
+  };
+  const rewritten = JSON.parse(
+    rewriteInitialRequest(
+      Buffer.from(JSON.stringify(body)),
+      framesFor(body.messages),
+      [{ role: "system", content: [{ type: "text", text: "environment", cache_control: marker }] }],
+      [{ beforeAssistant: null, content: [{ type: "text", text: "Updated system prompt section" }] }],
+    ).toString("utf8"),
+  );
+  const count = (value: unknown): number =>
+    Array.isArray(value)
+      ? value.reduce((sum: number, child) => sum + count(child), 0)
+      : value && typeof value === "object"
+        ? Object.entries(value).reduce(
+            (sum: number, [key, child]) => sum + (key === "cache_control" ? 1 : count(child)),
+            0,
+          )
+        : 0;
+  assert.equal(count(rewritten), 4);
+  // The previous query ("two") and the final message keep the conversation markers.
+  const messages = rewritten.messages as Array<{ role: string; content: unknown }>;
+  const marked = messages.flatMap((message, index) => (count(message.content) ? [index] : []));
+  assert.deepEqual(marked, [messages.findIndex((message) => contentHas(message, "two")), messages.length - 1]);
+});
+
+function contentHas(message: { content: unknown }, text: string): boolean {
+  return Array.isArray(message.content) && message.content.some((block) => (block as Block).text === text);
+}
+
 const userFrame = (text: string) => ({
   type: "user" as const,
   message: { role: "user" as const, content: [{ type: "text", text }] },
@@ -800,4 +851,35 @@ test("reports upstream 5xx as retryable and keeps 4xx non-retryable", async () =
   });
   assert.match(invalid.message, /Incomplete Claude Code upstream response \(status 400.*upstream said: bad request/);
   assert.equal(invalid.retryable, false);
+});
+
+test("keeps four breakpoints when Pi history follows Claude Code's marked system tail", () => {
+  const marker = { type: "ephemeral", ttl: "1h" };
+  const canonical = [
+    { role: "user", content: [text("q0")] },
+    { role: "assistant", content: [{ type: "tool_use", id: "t1", name: "mcp__pi__bash", input: { cache_control: "no-store" } }] },
+    { role: "user", content: [{ type: "tool_result", tool_use_id: "t1", content: "r" }] },
+  ];
+  const body = {
+    system: [text("billing"), { ...text("identity"), cache_control: marker }, { ...text("prompt"), cache_control: marker }],
+    tools: [{ name: "mcp__pi__bash", input_schema: { type: "object" }, cache_control: marker }],
+    messages: [
+      canonical[0],
+      { role: "system", content: [{ ...text("environment"), cache_control: marker }] },
+      canonical[1],
+      canonical[2],
+      { role: "system", content: [{ ...text("date"), cache_control: marker }, text("nudge")] },
+    ],
+  };
+  const out = JSON.parse(
+    rewriteInitialRequest(Buffer.from(JSON.stringify(body)), framesFor(canonical), undefined, [
+      { beforeAssistant: null, content: [text("Updated system prompt section")] },
+    ]).toString("utf8"),
+  ) as { messages: Array<{ role: string; content: Block[] }> };
+  const markers = JSON.stringify(out).split('"cache_control":{').length - 1;
+  assert.ok(markers <= 4, `found ${markers} cache_control markers`);
+  assert.ok(out.messages[1]!.content[0]!.cache_control, "environment keeps its marker");
+  assert.ok(out.messages.at(-1)!.content.at(-1)!.cache_control, "final message is marked");
+  const call = out.messages.find((message) => message.role === "assistant")!.content[0] as { input: Block };
+  assert.deepEqual(call.input, { cache_control: "no-store" }, "a tool argument named cache_control is kept");
 });

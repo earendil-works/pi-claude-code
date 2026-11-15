@@ -710,6 +710,20 @@ function setCacheBreakpoint(message: NativeRequestMessage): void {
 }
 
 function setReplayCacheBreakpoints(messages: NativeRequestMessage[]): void {
+  // This function owns the conversation breakpoints. Claude Code marks its newest
+  // user message; when a system message follows it (Pi's mid-session prompt update,
+  // a tool change), keeping that marker next to the final and previous-query ones
+  // made five markers and a 400 ("A maximum of 4 blocks with cache_control").
+  // The same goes for Claude Code's own marked system tail (date reminder) once Pi's
+  // system history follows it. Only the environment message (index 1) keeps its marker.
+  messages.forEach((message, index) => {
+    const environment = message.role === "system" && index === 1 && index < messages.length - 1;
+    if (environment || !Array.isArray(message.content)) return;
+    // Block level only: a cache_control key inside a tool call's input is the model's own data.
+    for (const block of message.content) {
+      if (block && typeof block === "object") delete (block as Record<string, unknown>).cache_control;
+    }
+  });
   const userIndexes = messages
     .map((message, index) => (message.role === "user" ? index : -1))
     .filter((index) => index >= 0);
