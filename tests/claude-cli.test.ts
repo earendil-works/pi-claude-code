@@ -852,3 +852,34 @@ test("reports upstream 5xx as retryable and keeps 4xx non-retryable", async () =
   assert.match(invalid.message, /Incomplete Claude Code upstream response \(status 400.*upstream said: bad request/);
   assert.equal(invalid.retryable, false);
 });
+
+test("keeps four breakpoints when Pi history follows Claude Code's marked system tail", () => {
+  const marker = { type: "ephemeral", ttl: "1h" };
+  const canonical = [
+    { role: "user", content: [text("q0")] },
+    { role: "assistant", content: [{ type: "tool_use", id: "t1", name: "mcp__pi__bash", input: { cache_control: "no-store" } }] },
+    { role: "user", content: [{ type: "tool_result", tool_use_id: "t1", content: "r" }] },
+  ];
+  const body = {
+    system: [text("billing"), { ...text("identity"), cache_control: marker }, { ...text("prompt"), cache_control: marker }],
+    tools: [{ name: "mcp__pi__bash", input_schema: { type: "object" }, cache_control: marker }],
+    messages: [
+      canonical[0],
+      { role: "system", content: [{ ...text("environment"), cache_control: marker }] },
+      canonical[1],
+      canonical[2],
+      { role: "system", content: [{ ...text("date"), cache_control: marker }, text("nudge")] },
+    ],
+  };
+  const out = JSON.parse(
+    rewriteInitialRequest(Buffer.from(JSON.stringify(body)), framesFor(canonical), undefined, [
+      { beforeAssistant: null, content: [text("Updated system prompt section")] },
+    ]).toString("utf8"),
+  ) as { messages: Array<{ role: string; content: Block[] }> };
+  const markers = JSON.stringify(out).split('"cache_control":{').length - 1;
+  assert.ok(markers <= 4, `found ${markers} cache_control markers`);
+  assert.ok(out.messages[1]!.content[0]!.cache_control, "environment keeps its marker");
+  assert.ok(out.messages.at(-1)!.content.at(-1)!.cache_control, "final message is marked");
+  const call = out.messages.find((message) => message.role === "assistant")!.content[0] as { input: Block };
+  assert.deepEqual(call.input, { cache_control: "no-store" }, "a tool argument named cache_control is kept");
+});
