@@ -15,6 +15,7 @@ import {
 } from "../src/claude-cli.ts";
 import type { NativeFrame } from "../src/native-types.ts";
 import { createClaudeCodeProvider } from "../src/provider.ts";
+import { getInitialSystemMessages, makeReplayDiagnostic, prepareFrames } from "../src/transcript.ts";
 
 type Block = Record<string, unknown>;
 type WireMessage = { role: string; content: unknown };
@@ -94,6 +95,72 @@ test("stabilizes Claude Code's native replay reminders and cache breakpoint", ()
   );
   assert.deepEqual((rewritten[5]?.content as Block[]).at(-1)?.cache_control, { type: "ephemeral", ttl: "1h" });
   assert.deepEqual((rewritten.at(-1)?.content as Block[]).at(-1)?.cache_control, { type: "ephemeral", ttl: "1h" });
+});
+
+for (const injections of [undefined, [], [{ beforeAssistant: null, content: [text("tool update")] }]]) {
+  test(`restores snapshot output_config only for native replay (${JSON.stringify(injections)})`, () => {
+    const marker = { type: "ephemeral", ttl: "1h" };
+    const snapshot = [
+      { role: "system", content: [{ ...text("environment"), cache_control: marker }], output_config: { effort: "medium" } },
+      { role: "system", content: "date", output_config: { effort: "high" } },
+    ];
+    const input = { output_config: "tool argument" };
+    const content = [
+      { type: "thinking" as const, thinking: "Test reasoning", signature: "Test signature" },
+      { type: "redacted_thinking" as const, data: "Test opaque signature" },
+      { type: "tool_use" as const, id: "t1", name: "mcp__pi__probe", input },
+    ];
+    const assistant: AssistantMessage = {
+      role: "assistant", api: "test", provider: "claude-code", model: "haiku", timestamp: 0, stopReason: "toolUse",
+      content: [{ type: "toolCall", id: "t1", name: "probe", arguments: input }],
+      usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+    };
+    assistant.diagnostics = [makeReplayDiagnostic({ role: "assistant", content }, assistant, snapshot) as never];
+    const original = structuredClone(assistant);
+    const frames = prepareFrames([
+      { role: "user", content: "inspect", timestamp: 0 },
+      assistant,
+      { role: "toolResult", toolCallId: "t1", toolName: "probe", content: [{ type: "text", text: "Test result" }], isError: false, timestamp: 1 },
+    ]);
+    const body = {
+      output_config: { effort: "low" },
+      messages: [
+        frames[0]!.message,
+        { role: "system", content: [text("new environment")] },
+        frames[1]!.message,
+        frames[2]!.message,
+      ],
+    };
+    const saved = getInitialSystemMessages([assistant])!;
+    const rewritten = JSON.parse(rewriteInitialRequest(
+      Buffer.from(JSON.stringify(body)), frames, saved, injections,
+    ).toString("utf8"));
+
+    assert.deepEqual(rewritten.output_config, body.output_config);
+    const expected = structuredClone(snapshot);
+    if (!injections) for (const message of expected) delete (message as Partial<typeof message>).output_config;
+    assert.deepEqual(rewritten.messages.slice(1, 3), expected);
+    assert.deepEqual(rewritten.messages[3].content, content);
+    assert.deepEqual(rewritten.messages.at(-1).content.at(-1).cache_control, marker);
+    assert.deepEqual(saved, snapshot);
+    assert.deepEqual(assistant, original);
+    if (injections?.length) assert.equal(rewritten.messages.at(-1).content[0].text, "tool update");
+  });
+}
+
+test("leaves current request output_config alone without a saved snapshot", () => {
+  const body = {
+    output_config: { effort: "low" },
+    messages: [
+      { role: "user", content: [text("inspect")] },
+      { role: "system", content: "environment", output_config: { effort: "medium" } },
+    ],
+  };
+  assert.deepEqual(
+    JSON.parse(rewriteInitialRequest(Buffer.from(JSON.stringify(body)), framesFor(body.messages), undefined).toString("utf8")),
+    body,
+  );
 });
 
 test("strips reminders when the first user message carries none (issue #27)", () => {
