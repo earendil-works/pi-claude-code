@@ -650,6 +650,7 @@ function withoutCacheControl(value: unknown): unknown {
 interface NativeRequestMessage {
   role?: string;
   content?: unknown;
+  output_config?: unknown;
 }
 
 function requestMessages(body: Buffer | undefined): NativeRequestMessage[] | undefined {
@@ -867,7 +868,10 @@ export function rewriteInitialRequest(
   if (initialSystemMessages?.length && messages) {
     let systemEnd = 1;
     while (messages[systemEnd]?.role === "system") systemEnd += 1;
-    messages.splice(1, systemEnd - 1, ...(structuredClone(initialSystemMessages) as NativeRequestMessage[]));
+    const restored = structuredClone(initialSystemMessages) as NativeRequestMessage[];
+    // Historical per-turn effort requires native replay's beta; fallback only restores the reminders.
+    if (!nativeSystemInjections) for (const message of restored) delete message.output_config;
+    messages.splice(1, systemEnd - 1, ...restored);
 
     const initialText = initialSystemMessages
       .map((message) => contentText((message as NativeRequestMessage).content))
