@@ -69,6 +69,35 @@ test("prepares replay frames and groups tool results", () => {
   assert.equal(frames[2]?.shouldQuery, undefined);
 });
 
+test("sends error tool results as text only because Claude Code drops their images", () => {
+  const image = { type: "image" as const, data: "shot", mimeType: "image/png" };
+  const call: AssistantMessage = {
+    role: "assistant",
+    api: "test",
+    provider: "claude-code",
+    model: "sonnet",
+    content: [
+      { type: "toolCall", id: "t1", name: "codemode", arguments: {} },
+      { type: "toolCall", id: "t2", name: "codemode", arguments: {} },
+    ],
+    usage,
+    stopReason: "toolUse",
+    timestamp: 1,
+  };
+  const result = (id: string, isError: boolean): Message => ({
+    role: "toolResult",
+    toolCallId: id,
+    toolName: "codemode",
+    content: [{ type: "text", text: "Output:" }, image, { type: "text", text: "Script error" }],
+    isError,
+    timestamp: 2,
+  });
+  const frames = prepareFrames([{ role: "user", content: "inspect", timestamp: 1 }, call, result("t1", true), result("t2", false)]);
+  const [failed, succeeded] = frames[2]!.message.content as Array<{ content: unknown; is_error: boolean }>;
+  assert.deepEqual(failed, { type: "tool_result", tool_use_id: "t1", content: "Output:\nScript error", is_error: true });
+  assert.equal((succeeded!.content as unknown[]).length, 3);
+});
+
 test("replays native signed blocks only while the visible projection is unchanged", () => {
   const assistant: AssistantMessage = {
     role: "assistant",

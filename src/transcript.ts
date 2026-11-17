@@ -146,7 +146,9 @@ function userContent(content: string | (TextContent | ImageContent)[]): unknown[
 
 function toolResultContent(message: ToolResultMessage): string | unknown[] {
   const hasImages = message.content.some((block) => block.type === "image");
-  if (!hasImages) {
+  // Claude Code drops images from error results and merges their text, so a
+  // canonical copy with images could never be matched against its request.
+  if (!hasImages || message.isError) {
     return sanitizeSurrogates(
       message.content
         .filter((block): block is TextContent => block.type === "text")

@@ -15,6 +15,7 @@ import {
 } from "../src/claude-cli.ts";
 import type { NativeFrame } from "../src/native-types.ts";
 import { createClaudeCodeProvider } from "../src/provider.ts";
+import { prepareFrames } from "../src/transcript.ts";
 
 type Block = Record<string, unknown>;
 type WireMessage = { role: string; content: unknown };
@@ -224,6 +225,48 @@ test("refuses requests that do not line up with Pi's history", () => {
       ),
     /lost a tool_result block in user message 1/,
   );
+});
+
+test("lines up a failed tool result that had images with Claude Code's text-only copy", () => {
+  const image = { type: "image" as const, data: "shot", mimeType: "image/png" };
+  const frames = prepareFrames([
+    { role: "user", content: "inspect", timestamp: 1 },
+    {
+      role: "assistant",
+      api: "test",
+      provider: "claude-code",
+      model: "sonnet",
+      content: [{ type: "toolCall", id: "t1", name: "codemode", arguments: {} }],
+      usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+      stopReason: "toolUse",
+      timestamp: 2,
+    },
+    {
+      role: "toolResult",
+      toolCallId: "t1",
+      toolName: "codemode",
+      content: [text("Script failed"), text("[Image saved to /tmp/shot.png]"), image, text("Script error: ENOENT")] as never,
+      isError: true,
+      timestamp: 3,
+    },
+  ]);
+  const failed = (frames[2]!.message.content as Block[])[0]!;
+  // Claude Code drops the images of an error result with array content and
+  // joins its text blocks into one; string content passes through unchanged.
+  const asSentByClaudeCode = (block: Block): Block => {
+    if (block.is_error !== true || !Array.isArray(block.content)) return block;
+    const content = block.content as Block[];
+    if (content.every((item) => item.type === "text")) return block;
+    const texts = content.filter((item) => item.type === "text").map((item) => item.text as string);
+    return { ...block, content: texts.length ? [text(texts.join("\n\n"))] : [] };
+  };
+  const wire = [
+    { role: "user", content: [text("inspect")] },
+    structuredClone(frames[1]!.message),
+    { role: "user", content: [asSentByClaudeCode(structuredClone(failed))] },
+  ];
+  assert.deepEqual(withoutMarkers(rewrite(wire, frames)[2]?.content), [failed]);
+  assert.equal(failed.content, "Script failed\n[Image saved to /tmp/shot.png]\nScript error: ENOENT");
 });
 
 test("injects native system history at assistant boundaries", () => {
