@@ -404,6 +404,15 @@ export function streamClaudeCode(
               },
             ]
           : []),
+        ...(preparedTools.skipped.length
+          ? [
+              {
+                type: "claude-code.skipped-tools",
+                timestamp: Date.now(),
+                details: { tools: preparedTools.skipped } as never,
+              },
+            ]
+          : []),
       ];
 
       if (output.stopReason === "error" || output.stopReason === "aborted" || output.stopReason === "pending") {

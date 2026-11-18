@@ -293,18 +293,39 @@ export interface ToolManifestEntry {
   inputSchema: Record<string, unknown>;
 }
 
+/** Pi tools are declared as `mcp__pi__<name>`; the native API caps tool names at 64 characters. */
+const VALID_TOOL_NAME = /^[A-Za-z0-9_-]{1,50}$/u;
+
+export interface SkippedTool {
+  name: string;
+  reason: "invalid-name" | "duplicate";
+}
+
+/**
+ * A tool Claude Code cannot declare is left out of the request instead of
+ * failing it. Otherwise one long MCP tool name loaded into the transcript makes
+ * every later turn of that branch fail. Only the declaration is skipped: the
+ * tool stays registered in Pi.
+ */
 export function prepareTools(tools: Tool[]): {
   manifest: ToolManifestEntry[];
   nativeTools: Array<Record<string, unknown>>;
   names: Set<string>;
+  skipped: SkippedTool[];
 } {
   const names = new Set<string>();
   const manifest: ToolManifestEntry[] = [];
   const nativeTools: Array<Record<string, unknown>> = [];
+  const skipped: SkippedTool[] = [];
 
   for (const tool of tools) {
-    if (!/^[A-Za-z0-9_-]{1,50}$/u.test(tool.name) || names.has(tool.name)) {
-      throw new Error("Claude Code tool names must be unique ASCII identifiers of at most 50 characters");
+    if (!VALID_TOOL_NAME.test(tool.name)) {
+      skipped.push({ name: tool.name, reason: "invalid-name" });
+      continue;
+    }
+    if (names.has(tool.name)) {
+      skipped.push({ name: tool.name, reason: "duplicate" });
+      continue;
     }
     names.add(tool.name);
     const schema = normalizeInputSchema(tool.parameters);
@@ -315,20 +336,21 @@ export function prepareTools(tools: Tool[]): {
       input_schema: schema,
     });
   }
-  return { manifest, nativeTools, names };
+  return { manifest, nativeTools, names, skipped };
 }
 
-function nativeSystemBlocks(message: SystemMessage): Array<Record<string, unknown>> {
+function nativeSystemBlocks(message: SystemMessage, declared: Set<string>): Array<Record<string, unknown>> {
   const blocks: Array<Record<string, unknown>> = [];
   const text = renderSystemMessageUpdate(message);
   if (text) blocks.push({ type: "text", text: sanitizeSurrogates(text) });
-  for (const tool of message.toolsRemoved ?? []) {
+  // A reference to a tool that was left out of the request would be rejected.
+  for (const tool of (message.toolsRemoved ?? []).filter((tool) => declared.has(tool.name))) {
     blocks.push({
       type: "tool_removal",
       tool: { type: "tool_reference", name: `${TOOL_PREFIX}${tool.name}` },
     });
   }
-  for (const tool of message.toolsAdded ?? []) {
+  for (const tool of (message.toolsAdded ?? []).filter((tool) => declared.has(tool.name))) {
     blocks.push({
       type: "tool_addition",
       tool: { type: "tool_reference", name: `${TOOL_PREFIX}${tool.name}` },
@@ -355,10 +377,13 @@ export function prepareNativeTranscript(
     prepared.nativeTools.map((tool) => [String(tool.name).slice(TOOL_PREFIX.length), tool]),
   );
   const initialNames = new Set(initialTools.map((tool) => tool.name));
-  const initialNative = initialTools.map((tool) => structuredClone(nativeByName.get(tool.name)!));
+  const initialNative = initialTools
+    .filter((tool) => nativeByName.has(tool.name))
+    .map((tool) => structuredClone(nativeByName.get(tool.name)!));
+  if (initialNative.length === 0) return undefined;
   initialNative.at(-1)!.cache_control = { type: "ephemeral", ttl: "1h" };
   const laterNative = declared
-    .filter((tool) => !initialNames.has(tool.name))
+    .filter((tool) => !initialNames.has(tool.name) && nativeByName.has(tool.name))
     .map((tool) => ({ ...structuredClone(nativeByName.get(tool.name)!), defer_loading: true }));
 
   const systemInjections: NativeSystemInjection[] = [];
@@ -372,7 +397,7 @@ export function prepareNativeTranscript(
   for (let index = 1; index < messages.length; index++) {
     const message = messages[index]!;
     if (message.role === "system") {
-      const blocks = nativeSystemBlocks(message);
+      const blocks = nativeSystemBlocks(message, prepared.names);
       if (blocks.length) pending.push(blocks);
     } else if (message.role === "assistant" && assistantContent(message).length > 0) {
       flush(assistantOrdinal);
