@@ -187,6 +187,60 @@ test("builds cache-stable native tool declarations and chronological system chan
   );
 });
 
+test("skips tools Claude Code cannot declare instead of failing the request", () => {
+  const tool = (name: string) =>
+    ({ name, description: name, parameters: { type: "object", properties: {} } }) as unknown as Tool;
+  const longName = "mcp__example_server__a_tool_name_that_is_much_too_long_for_claude";
+  const prepared = prepareTools([tool("alpha"), tool(longName), tool("bad.name"), tool("alpha")]);
+  assert.deepEqual(prepared.manifest.map((entry) => entry.name), ["alpha"]);
+  assert.deepEqual(prepared.nativeTools.map((entry) => entry.name), [`${TOOL_PREFIX}alpha`]);
+  assert.deepEqual(prepared.skipped, [
+    { name: longName, reason: "invalid-name" },
+    { name: "bad.name", reason: "invalid-name" },
+    { name: "alpha", reason: "duplicate" },
+  ]);
+
+  const assistant: AssistantMessage = {
+    role: "assistant",
+    api: "test",
+    provider: "claude-code",
+    model: "opus",
+    content: [{ type: "text", text: "one" }],
+    usage,
+    stopReason: "stop",
+    timestamp: 2,
+  };
+  const plan = prepareNativeTranscript(
+    [
+      { role: "system", content: "base", toolsAdded: [tool("alpha"), tool(longName)], timestamp: 0 },
+      { role: "user", content: "first", timestamp: 1 },
+      assistant,
+      { role: "system", content: "loaded", toolsAdded: [tool("beta"), tool(`${longName}_2`)], timestamp: 3 },
+      { role: "user", content: "second", timestamp: 4 },
+    ],
+    true,
+  )!;
+  assert.deepEqual(
+    plan.requestTools.map((entry) => entry.name),
+    [`${TOOL_PREFIX}alpha`, "__pi_deferred_placeholder__", `${TOOL_PREFIX}beta`],
+  );
+  assert.deepEqual(plan.systemInjections.at(-1)?.content, [
+    { type: "text", text: "loaded" },
+    { type: "tool_addition", tool: { type: "tool_reference", name: `${TOOL_PREFIX}beta` } },
+  ]);
+
+  assert.equal(
+    prepareNativeTranscript(
+      [
+        { role: "system", content: "base", toolsAdded: [tool(longName)], timestamp: 0 },
+        { role: "user", content: "go", timestamp: 1 },
+      ],
+      true,
+    ),
+    undefined,
+  );
+});
+
 test("normalizes tool schemas and builds native generation fields", () => {
   const tools = [
     {
