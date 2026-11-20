@@ -90,6 +90,18 @@ function withoutContextSuffix(model: string): string {
   return model.replace(/\[1m\]$/u, "");
 }
 
+/**
+ * The `--model` value that runs exactly this catalog row. Claude Code repoints its family aliases
+ * (`sonnet`, `haiku`, `opus`) at newer models, so a row is routed by the model it resolved to, never
+ * by its alias; the 1M-context suffix is kept. Only `default` stays an alias: it means "Claude Code's
+ * own choice". Unresolved rows keep their original route.
+ */
+function nativeRoute(info: DiscoveredClaudeModel): string {
+  if (info.value === "default" || !info.resolvedModel) return info.value;
+  const longContext = info.value.endsWith("[1m]") || info.resolvedModel.endsWith("[1m]");
+  return `${withoutContextSuffix(info.resolvedModel)}${longContext ? "[1m]" : ""}`;
+}
+
 function canonicalModelId(info: DiscoveredClaudeModel): string {
   if (info.value === "default") return "default";
   return withoutContextSuffix(info.resolvedModel || ALIASES[withoutContextSuffix(info.value)] || info.value);
@@ -138,7 +150,7 @@ export function modelFromDiscovery(info: DiscoveredClaudeModel): ClaudeCodeModel
   const id = canonicalModelId(info);
   const builtinId = id === "default" ? withoutContextSuffix(info.resolvedModel || "") : id;
   const builtin = BUILTIN_ANTHROPIC_MODELS[builtinId];
-  NATIVE_ROUTE_BY_ID.set(id, info.value);
+  NATIVE_ROUTE_BY_ID.set(id, nativeRoute(info));
   NATIVE_TOOL_CHANGES_BY_ID.set(id, builtin?.compat?.supportsMidConvoToolChanges === true);
   ADAPTIVE_THINKING_BY_ID.set(id, info.supportsAdaptiveThinking === true);
   DISABLED_THINKING_BY_ID.set(
