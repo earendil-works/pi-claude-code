@@ -178,6 +178,19 @@ test("strips reminder blocks from text-array tool results and keeps Claude Code'
   ]);
 });
 
+test("restores error tool results that Claude Code flattened and stripped of images", () => {
+  const image = { type: "image", source: { type: "base64", media_type: "image/png", data: "original" } };
+  const result = { type: "tool_result", tool_use_id: "t1", is_error: true, content: [text("failed"), image, text("error")] };
+  const canonical = [
+    { role: "user", content: [text("inspect")] },
+    { role: "assistant", content: [{ type: "tool_use", id: "t1", name: "read", input: {} }] },
+    { role: "user", content: [result] },
+  ];
+  const wire = structuredClone(canonical);
+  wire[2]!.content = [{ ...result, content: [text("failed\n\nerror")] }, text(memory)];
+  assert.deepEqual(rewrite(wire, framesFor(canonical))[2]?.content, [result]);
+});
+
 test("keeps user-authored reminder-like text and ordinary output unchanged", () => {
   const canonical = [
     { role: "user", content: [text("<system-reminder>mine</system-reminder>"), text("inspect")] },
