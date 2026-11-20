@@ -112,6 +112,33 @@ const STRIPPED_REQUEST_HEADERS = new Set([
 const STRIPPED_RESPONSE_HEADERS = new Set(["connection", "transfer-encoding", "server", "date"]);
 
 /**
+ * The documented beta for a `role: "system"` message with `output_config` (per-message effort).
+ * Replay can restore such a message into a request whose header does not admit it. Without this
+ * beta, Anthropic documents `messages.N.output_config: Extra inputs are not permitted`.
+ * This admits the field; it does not enable per-message effort on unsupported models.
+ * https://platform.claude.com/docs/en/build-with-claude/effort-per-message
+ */
+const PER_MESSAGE_OUTPUT_CONFIG_BETA = "mid-conversation-output-config-2026-07-01";
+
+function hasPerMessageOutputConfig(body: Buffer): boolean {
+  try {
+    const { messages } = JSON.parse(body.toString("utf8")) as { messages?: unknown };
+    return (
+      Array.isArray(messages) &&
+      messages.some(
+        (message) =>
+          message !== null &&
+          typeof message === "object" &&
+          (message as { role?: unknown }).role === "system" &&
+          (message as { output_config?: unknown }).output_config !== undefined,
+      )
+    );
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Describe a relay failure without losing what Node puts outside `message`:
  * connection errors carry their reason in `code`, and a connection attempt to
  * every address of a host fails with an `AggregateError` that has no message.
@@ -289,15 +316,14 @@ export class TurnRelay {
       }
       headers["accept-encoding"] = "identity";
       headers["content-length"] = body.length;
-      if (this.requestBetas.length > 0) {
+      const betas = [...this.requestBetas];
+      if (hasPerMessageOutputConfig(body)) betas.push(PER_MESSAGE_OUTPUT_CONFIG_BETA);
+      if (betas.length > 0) {
         const existing = Array.isArray(headers["anthropic-beta"])
           ? headers["anthropic-beta"].join(",")
           : String(headers["anthropic-beta"] ?? "");
         headers["anthropic-beta"] = [
-          ...new Set([
-            ...existing.split(",").map((value) => value.trim()).filter(Boolean),
-            ...this.requestBetas,
-          ]),
+          ...new Set([...existing.split(",").map((value) => value.trim()).filter(Boolean), ...betas]),
         ].join(",");
       }
 
