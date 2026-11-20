@@ -287,6 +287,34 @@ export function normalizeInputSchema(schema: unknown): Record<string, unknown> {
   return normalized;
 }
 
+/**
+ * A model sometimes sends an array- or object-typed argument as a JSON-encoded
+ * string (`{"questions": "[{...}]"}`). Pi stores the raw arguments in the session,
+ * and renderers read them unvalidated, so a string where the schema declares an
+ * array or object crashes the TUI on every re-render. Parse such a value back
+ * when, and only when, it parses to the declared type.
+ */
+export function coerceStringifiedArguments<T>(args: T, schema: Record<string, unknown> | undefined): T {
+  const properties = schema?.properties;
+  if (!args || typeof args !== "object" || Array.isArray(args) || !properties || typeof properties !== "object") {
+    return args;
+  }
+  let result: Record<string, unknown> | undefined;
+  for (const [key, value] of Object.entries(args as Record<string, unknown>)) {
+    if (typeof value !== "string") continue;
+    const declared = (properties as Record<string, { type?: unknown } | undefined>)[key]?.type;
+    if (declared !== "array" && declared !== "object") continue;
+    try {
+      const parsed = JSON.parse(value) as unknown;
+      const matches = declared === "array" ? Array.isArray(parsed) : !!parsed && typeof parsed === "object" && !Array.isArray(parsed);
+      if (matches) (result ??= { ...(args as Record<string, unknown>) })[key] = parsed;
+    } catch {
+      // Not JSON: leave the value for the tool's own validation to reject.
+    }
+  }
+  return (result ?? args) as T;
+}
+
 export interface ToolManifestEntry {
   name: string;
   description: string;
