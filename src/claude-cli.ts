@@ -763,7 +763,14 @@ function alignCanonicalContent(canonical: unknown[], wire: unknown[], where: str
         candidate.type === block.type &&
         (block.type !== "tool_result" || candidate.tool_use_id === block.tool_use_id),
     );
-    if (index < 0) throw new Error(`Claude Code request lost a ${String(block.type)} block in ${where}`);
+    if (index < 0) {
+      // Claude Code flattens error tool results to one text block without images.
+      if (block.type === "text" || block.type === "image") {
+        output.push(structuredClone(block));
+        continue;
+      }
+      throw new Error(`Claude Code request lost a ${String(block.type)} block in ${where}`);
+    }
     const native = wire[index] as ContentBlock;
     cursor = index + 1;
 
