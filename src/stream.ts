@@ -27,6 +27,7 @@ import {
   prepareFrames,
   prepareMessages,
   prepareNativeTranscript,
+  coerceStringifiedArguments,
   prepareTools,
   TOOL_PREFIX,
 } from "./transcript.ts";
@@ -129,7 +130,9 @@ function piToolName(nativeName: string): string {
   return nativeName.startsWith(TOOL_PREFIX) ? nativeName.slice(TOOL_PREFIX.length) : nativeName;
 }
 
-function nativeContent(content: NativeContentBlock[]): AssistantMessage["content"] {
+type ToolSchemas = ReadonlyMap<string, Record<string, unknown>>;
+
+function nativeContent(content: NativeContentBlock[], schemas: ToolSchemas = new Map()): AssistantMessage["content"] {
   const converted: AssistantMessage["content"] = [];
   for (const block of content) {
     if (block.type === "text") {
@@ -148,7 +151,7 @@ function nativeContent(content: NativeContentBlock[]): AssistantMessage["content
         redacted: true,
       });
     } else if (block.type === "tool_use") {
-      converted.push({ type: "toolCall", id: block.id, name: piToolName(block.name), arguments: block.input as never });
+      converted.push({ type: "toolCall", id: block.id, name: piToolName(block.name), arguments: coerceStringifiedArguments(block.input, schemas.get(piToolName(block.name))) as never });
     }
   }
   return converted;
@@ -162,6 +165,7 @@ class EventTranslator {
     private readonly model: Model<any>,
     private readonly output: AssistantMessage,
     private readonly stream: AssistantMessageEventStream,
+    private readonly schemas: ToolSchemas = new Map(),
   ) {}
 
   event(event: AnthropicStreamEvent): void {
@@ -197,7 +201,7 @@ class EventTranslator {
     usage: NativeUsage,
     initialSystemMessages?: unknown[],
   ): void {
-    const authoritative = nativeContent(message.content);
+    const authoritative = nativeContent(message.content, this.schemas);
     if (!this.sawContentEvent) {
       this.emitComplete(authoritative);
     } else if (JSON.stringify(comparableContent(this.output.content)) !== JSON.stringify(comparableContent(authoritative))) {
@@ -285,7 +289,10 @@ class EventTranslator {
     } else if (block.type === "thinking") {
       this.stream.push({ type: "thinking_end", contentIndex, content: block.thinking, partial: this.output });
     } else {
-      block.arguments = parseArguments(block.partialJson, block.arguments);
+      block.arguments = coerceStringifiedArguments(
+        parseArguments(block.partialJson, block.arguments),
+        this.schemas.get(block.name),
+      );
       delete (block as Partial<IndexedToolCall>).partialJson;
       this.stream.push({ type: "toolcall_end", contentIndex, toolCall: block, partial: this.output });
     }
@@ -367,7 +374,12 @@ export function streamClaudeCode(
         nativeTranscript?.requestTools ?? preparedTools.nativeTools,
         options,
       );
-      const translator = new EventTranslator(model, output, stream);
+      const translator = new EventTranslator(
+        model,
+        output,
+        stream,
+        new Map(preparedTools.manifest.map((entry) => [entry.name, entry.inputSchema])),
+      );
 
       stream.push({ type: "start", partial: output });
       const response = await runClaudeRequest({
