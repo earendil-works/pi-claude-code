@@ -178,6 +178,50 @@ test("strips reminder blocks from text-array tool results and keeps Claude Code'
   ]);
 });
 
+test("keeps replaying a long session after Claude Code removes its oldest images", () => {
+  // Claude Code caps the images in one request. Past the cap it removes the
+  // oldest ones itself, so the request no longer holds every image Pi sent.
+  const removed =
+    "[media removed: request limit. You have already seen this, and what you concluded from it still stands. " +
+    "It made room for newer images and documents. Re-reading pushes out others and re-sends everything, so don't re-read them all.]";
+  const image = (data: string): Block => ({ type: "image", source: { type: "base64", media_type: "image/png", data } });
+  const toolUse = (id: string): WireMessage => ({
+    role: "assistant",
+    content: [{ type: "tool_use", id, name: "read", input: {} }],
+  });
+  const frames = framesFor([
+    { role: "user", content: [image("pasted-old"), text("compare these"), image("pasted-new")] },
+    toolUse("t1"),
+    { role: "user", content: [{ type: "tool_result", tool_use_id: "t1", content: [text("old screenshot"), image("old")] }] },
+    toolUse("t2"),
+    { role: "user", content: [{ type: "tool_result", tool_use_id: "t2", content: [text("new screenshot"), image("new")] }] },
+  ]);
+
+  const rewritten = rewrite(
+    [
+      // A removed image in the user's own message leaves nothing behind.
+      { role: "user", content: [text(memory), text("compare these"), image("pasted-new")] },
+      toolUse("t1"),
+      // Inside a tool result, a note takes the removed image's place.
+      { role: "user", content: [{ type: "tool_result", tool_use_id: "t1", content: [text("old screenshot"), text(removed)] }] },
+      toolUse("t2"),
+      { role: "user", content: [{ type: "tool_result", tool_use_id: "t2", content: [text("new screenshot"), image("new")] }] },
+    ],
+    frames,
+  );
+
+  // The removal is Claude Code's call: sending the image back would only hit
+  // the same limit, so the request goes out as Claude Code trimmed it.
+  assert.deepEqual(rewritten[0]?.content, [text("compare these"), image("pasted-new")]);
+  assert.deepEqual(rewritten[2]?.content, [
+    { type: "tool_result", tool_use_id: "t1", content: [text("old screenshot"), text(removed)] },
+  ]);
+  // Images that still fit are untouched.
+  assert.deepEqual(rewritten[4]?.content, [
+    { type: "tool_result", tool_use_id: "t2", content: [text("new screenshot"), image("new")] },
+  ]);
+});
+
 test("keeps user-authored reminder-like text and ordinary output unchanged", () => {
   const canonical = [
     { role: "user", content: [text("<system-reminder>mine</system-reminder>"), text("inspect")] },
