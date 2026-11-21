@@ -743,19 +743,47 @@ function isImageScaleNote(block: unknown): boolean {
   );
 }
 
+/** Claude Code's note in place of an image it removed to keep the request under its media limits. */
+function isMediaRemovedNote(block: unknown): boolean {
+  return (
+    isBlock(block) &&
+    block.type === "text" &&
+    typeof block.text === "string" &&
+    block.text.startsWith("[media removed: request limit.")
+  );
+}
+
+function countImages(blocks: unknown[]): number {
+  return blocks.filter((block) => isBlock(block) && block.type === "image").length;
+}
+
 /**
  * Rebuild native user content from Pi's canonical blocks. Claude Code adds
  * reminders (auto-memory, account context, attachments) to user messages and
  * appends them to tool-result text; none of that is Pi history. Canonical
  * blocks are matched in order to Claude Code's blocks by type, and anything
  * Claude Code added is dropped. Images are the exception: Claude Code may
- * downscale them and add a coordinate note, so its copies are kept.
+ * downscale them and add a coordinate note, so its copies are kept. In a long
+ * session it also removes the oldest images to fit its media limits; those
+ * stay removed (sending them back would only hit the same limit), along with
+ * the note Claude Code leaves in their place.
  */
 function alignCanonicalContent(canonical: unknown[], wire: unknown[], where: string): unknown[] {
   const output: unknown[] = [];
   let cursor = 0;
+  // Claude Code removes oldest first, so the missing images are the leading ones.
+  let removedImages = Math.max(0, countImages(canonical) - countImages(wire));
   for (const block of canonical) {
     if (!isBlock(block)) throw new Error(`Claude Code request has an invalid canonical block in ${where}`);
+    if (block.type === "image" && removedImages > 0) {
+      removedImages -= 1;
+      const note = wire.findIndex((candidate, position) => position >= cursor && isMediaRemovedNote(candidate));
+      if (note >= 0) {
+        output.push(withoutCacheControl(wire[note]));
+        cursor = note + 1;
+      }
+      continue;
+    }
     const index = wire.findIndex(
       (candidate, position) =>
         position >= cursor &&
