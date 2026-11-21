@@ -461,8 +461,11 @@ for await (const line of input) {
 
   const events: string[] = [];
   const originalApiKey = process.env.ANTHROPIC_API_KEY;
+  const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
   try {
     process.env.ANTHROPIC_API_KEY = "pi-test-dummy";
+    // Keep the saved login status out of the real agent directory.
+    process.env.PI_CODING_AGENT_DIR = join(root, "agent");
     const provider = createClaudeCodeProvider();
     const authCheck = await provider.auth.apiKey?.check?.({
       ctx: {
@@ -667,6 +670,8 @@ for await (const line of input) {
   } finally {
     if (originalApiKey === undefined) delete process.env.ANTHROPIC_API_KEY;
     else process.env.ANTHROPIC_API_KEY = originalApiKey;
+    if (originalAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = originalAgentDir;
     await closeClaudeProcesses();
     await rm(root, { recursive: true, force: true });
   }
