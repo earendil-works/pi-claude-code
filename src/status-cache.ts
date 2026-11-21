@@ -1,6 +1,6 @@
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
-import type { ClaudeStatus } from "./claude-cli.ts";
+import { claudeStatusKey, type ClaudeStatus } from "./claude-cli.ts";
 
 /** The part of a status check that decides whether Pi shows the provider. */
 export type StoredStatus = Pick<ClaudeStatus, "available" | "loggedIn" | "subscription" | "plan">;
@@ -21,15 +21,6 @@ export interface StatusCacheOptions {
   liveTtlMs?: number;
 }
 
-/** Statuses for different Claude Code installations or accounts are stored separately. */
-export function statusKey(env: Env): string {
-  return JSON.stringify([
-    env.PI_CLAUDE_CODE_COMMAND ?? "",
-    env.PI_CLAUDE_CODE_CONFIG_DIR ?? env.CLAUDE_CONFIG_DIR ?? "",
-    env.HOME ?? env.USERPROFILE ?? "",
-  ]);
-}
-
 function stored(status: StoredStatus): StoredStatus {
   return {
     available: status.available,
@@ -41,6 +32,26 @@ function stored(status: StoredStatus): StoredStatus {
 
 function sameStatus(a: StoredStatus, b: StoredStatus): boolean {
   return a.available === b.available && a.loggedIn === b.loggedIn && a.subscription === b.subscription && a.plan === b.plan;
+}
+
+/** Settle with `promise`, or reject as soon as `signal` aborts without waiting for it. */
+function abortable<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) return promise;
+  signal.throwIfAborted();
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(signal.reason);
+    signal.addEventListener("abort", onAbort, { once: true });
+    promise.then(
+      (value) => {
+        signal.removeEventListener("abort", onAbort);
+        resolve(value);
+      },
+      (error: unknown) => {
+        signal.removeEventListener("abort", onAbort);
+        reject(error);
+      },
+    );
+  });
 }
 
 /**
@@ -63,7 +74,6 @@ export class ClaudeStatusCache {
   private readonly fresh = new Map<string, StoredStatus>();
   /** What `check()` last returned per key, to detect stale answers. */
   private readonly served = new Map<string, StoredStatus>();
-  private writes: Promise<void> = Promise.resolve();
 
   constructor(options: StatusCacheOptions) {
     const { path } = options;
@@ -75,10 +85,10 @@ export class ClaudeStatusCache {
   /** Status for Pi's auth check: in-process result, else saved logged-in result, else a live check. */
   async check(env: Env, signal?: AbortSignal): Promise<StoredStatus> {
     signal?.throwIfAborted();
-    const key = statusKey(env);
-    const known = this.fresh.get(key) ?? (await this.readSaved(key));
-    const status = known?.loggedIn ? known : await this.liveStatus(env, key);
-    signal?.throwIfAborted();
+    const key = claudeStatusKey(env);
+    const known = this.fresh.get(key) ?? this.readSaved(key);
+    // An aborted caller stops waiting; the shared probe still finishes and saves for the others.
+    const status = known?.loggedIn ? known : await abortable(this.liveStatus(env, key), signal);
     this.served.set(key, status);
     return status;
   }
@@ -88,15 +98,10 @@ export class ClaudeStatusCache {
    * `check()` returned, meaning Pi should check the provider again.
    */
   async revalidate(env: Env): Promise<boolean> {
-    const key = statusKey(env);
+    const key = claudeStatusKey(env);
     const status = await this.liveStatus(env, key);
     const served = this.served.get(key);
     return served !== undefined && !sameStatus(served, status);
-  }
-
-  /** Wait for pending writes to the saved file. */
-  flush(): Promise<void> {
-    return this.writes;
   }
 
   private liveStatus(env: Env, key: string): Promise<StoredStatus> {
@@ -122,9 +127,9 @@ export class ClaudeStatusCache {
     return promise;
   }
 
-  private async readFile(): Promise<StatusFile | undefined> {
+  private readFile(): StatusFile | undefined {
     try {
-      const parsed = JSON.parse(await readFile(this.resolvePath(), "utf8")) as Partial<StatusFile>;
+      const parsed = JSON.parse(readFileSync(this.resolvePath(), "utf8")) as Partial<StatusFile>;
       return parsed.version === 1 && parsed.entries && typeof parsed.entries === "object"
         ? (parsed as StatusFile)
         : undefined;
@@ -133,24 +138,30 @@ export class ClaudeStatusCache {
     }
   }
 
-  private async readSaved(key: string): Promise<StoredStatus | undefined> {
-    const entry = (await this.readFile())?.entries[key];
+  private readSaved(key: string): StoredStatus | undefined {
+    const entry = this.readFile()?.entries[key];
     return entry && typeof entry.loggedIn === "boolean" ? stored(entry) : undefined;
   }
 
+  /**
+   * Save synchronously, as soon as the probe settles. An asynchronous write can
+   * be cut off when Pi exits right after the auth check (`pi --list-models`),
+   * which leaves the temporary file behind.
+   */
   private save(key: string, status: StoredStatus): void {
-    this.writes = this.writes.then(async () => {
+    const path = this.resolvePath();
+    const temporary = `${path}.${process.pid}.tmp`;
+    try {
+      const file = this.readFile() ?? { version: 1, entries: {} };
+      file.entries[key] = { ...status, checkedAt: Date.now() };
+      mkdirSync(dirname(path), { recursive: true });
+      writeFileSync(temporary, `${JSON.stringify(file, null, 2)}\n`, { mode: 0o600 });
+      renameSync(temporary, path);
+    } catch {
+      // The cache only speeds up startup; a failed write means the next start checks live.
       try {
-        const file = (await this.readFile()) ?? { version: 1, entries: {} };
-        file.entries[key] = { ...status, checkedAt: Date.now() };
-        const path = this.resolvePath();
-        await mkdir(dirname(path), { recursive: true });
-        const temporary = `${path}.${process.pid}.tmp`;
-        await writeFile(temporary, `${JSON.stringify(file, null, 2)}\n`, { mode: 0o600 });
-        await rename(temporary, path);
-      } catch {
-        // The cache only speeds up startup; a failed write means the next start checks live.
-      }
-    });
+        rmSync(temporary, { force: true });
+      } catch {}
+    }
   }
 }

@@ -271,6 +271,21 @@ export async function getClaudeStatus(
 }
 
 const READY_STATUS_TTL_MS = 60_000;
+/**
+ * Identifies the Claude Code installation and account a status check applies to:
+ * everything that changes which executable runs or which login it reads.
+ */
+export function claudeStatusKey(envInput: Record<string, string | undefined>): string {
+  const env = claudeEnvironment(envInput);
+  return JSON.stringify([
+    configuredCommand(env),
+    envValue(env, "PATH"),
+    envValue(env, "HOME") ?? envValue(env, "USERPROFILE"),
+    env.CLAUDE_CONFIG_DIR,
+    envValue(env, POWERSHELL_ENV),
+  ]);
+}
+
 const readyStatusCache = new Map<string, { command: string; expires: number }>();
 
 /**
@@ -283,13 +298,7 @@ async function readyClaudeCommand(
   signal?: AbortSignal,
 ): Promise<string> {
   const env = claudeEnvironment(envInput);
-  const key = JSON.stringify([
-    configuredCommand(env),
-    envValue(env, "PATH"),
-    envValue(env, "HOME") ?? envValue(env, "USERPROFILE"),
-    env.CLAUDE_CONFIG_DIR,
-    envValue(env, POWERSHELL_ENV),
-  ]);
+  const key = claudeStatusKey(env);
   const cached = readyStatusCache.get(key);
   if (cached && cached.expires > Date.now()) return cached.command;
 

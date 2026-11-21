@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import type { ClaudeStatus } from "../src/claude-cli.ts";
-import { ClaudeStatusCache, statusKey } from "../src/status-cache.ts";
+import { claudeStatusKey, type ClaudeStatus } from "../src/claude-cli.ts";
+import { ClaudeStatusCache } from "../src/status-cache.ts";
 
 const LOGGED_IN: ClaudeStatus = { available: true, loggedIn: true, subscription: true, plan: "max", command: "claude" };
 const LOGGED_OUT: ClaudeStatus = { available: true, loggedIn: false, subscription: false, command: "claude" };
@@ -29,7 +29,6 @@ function countingProbe(...results: ClaudeStatus[]) {
 async function saveStatus(path: string, status: ClaudeStatus): Promise<void> {
   const seed = new ClaudeStatusCache({ path, probe: async () => status });
   await seed.check(ENV);
-  await seed.flush();
 }
 
 test("shares one live check across concurrent startup checks and saves it", async (t) => {
@@ -41,12 +40,11 @@ test("shares one live check across concurrent startup checks and saves it", asyn
   assert.equal(probe.calls, 1);
   for (const status of results) assert.equal(status.loggedIn, true);
 
-  await cache.flush();
   const saved = JSON.parse(await readFile(path, "utf8"));
   assert.equal(saved.version, 1);
-  assert.equal(saved.entries[statusKey(ENV)].loggedIn, true);
-  assert.equal(saved.entries[statusKey(ENV)].plan, "max");
-  assert.equal("command" in saved.entries[statusKey(ENV)], false);
+  assert.equal(saved.entries[claudeStatusKey(ENV)].loggedIn, true);
+  assert.equal(saved.entries[claudeStatusKey(ENV)].plan, "max");
+  assert.equal("command" in saved.entries[claudeStatusKey(ENV)], false);
 });
 
 test("answers from a saved logged-in status without waiting for Claude Code", async (t) => {
@@ -93,9 +91,8 @@ test("revalidate reports a stale answer and later checks use the live result", a
   assert.equal(await cache.revalidate(ENV), false);
   assert.equal(probe.calls, 1);
 
-  await cache.flush();
   const saved = JSON.parse(await readFile(path, "utf8"));
-  assert.equal(saved.entries[statusKey(ENV)].loggedIn, false);
+  assert.equal(saved.entries[claudeStatusKey(ENV)].loggedIn, false);
 });
 
 test("revalidate reports no change when the saved status is still correct", async (t) => {
@@ -138,8 +135,50 @@ test("retries the live check after a failure and ignores a corrupt file", async 
   assert.equal(calls, 2);
 });
 
-test("honors an aborted signal", async (t) => {
+test("honors an already aborted signal", async (t) => {
   const path = await tempPath(t);
   const cache = new ClaudeStatusCache({ path, probe: countingProbe(LOGGED_IN) });
   await assert.rejects(cache.check(ENV, AbortSignal.abort()), { name: "AbortError" });
+});
+
+test("an aborted check rejects without waiting for the live probe, which still saves", async (t) => {
+  const path = await tempPath(t);
+  let release!: () => void;
+  const blocked = new Promise<void>((resolve) => (release = resolve));
+  const cache = new ClaudeStatusCache({
+    path,
+    probe: async () => {
+      await blocked;
+      return LOGGED_IN;
+    },
+  });
+
+  const controller = new AbortController();
+  const aborted = cache.check(ENV, controller.signal);
+  const other = cache.check(ENV);
+  controller.abort();
+  await assert.rejects(aborted, { name: "AbortError" });
+
+  release();
+  assert.equal((await other).loggedIn, true);
+  const saved = JSON.parse(await readFile(path, "utf8"));
+  assert.equal(saved.entries[claudeStatusKey(ENV)].loggedIn, true);
+});
+
+test("saves before the check resolves and leaves no temporary file", async (t) => {
+  const path = await tempPath(t);
+  const cache = new ClaudeStatusCache({ path, probe: countingProbe(LOGGED_IN) });
+  await cache.check(ENV);
+  // Nothing is left pending, so Pi exiting right after the check cannot cut off the write.
+  assert.deepEqual(await readdir(join(path, "..")), ["claude-code-status.json"]);
+});
+
+test("the key covers PATH and the PowerShell override like the request-path cache", () => {
+  const base = claudeStatusKey(ENV);
+  assert.notEqual(claudeStatusKey({ ...ENV, PATH: "/opt/claude/bin" }), base);
+  assert.notEqual(claudeStatusKey({ ...ENV, PI_CLAUDE_CODE_POWERSHELL: "pwsh" }), base);
+  assert.equal(
+    claudeStatusKey({ ...ENV, PI_CLAUDE_CODE_CONFIG_DIR: "/home/test/.claude-work" }),
+    claudeStatusKey({ ...ENV, CLAUDE_CONFIG_DIR: "/home/test/.claude-work" }),
+  );
 });
