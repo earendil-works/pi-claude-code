@@ -71,6 +71,16 @@ These environment variables are optional:
 - `PI_CLAUDE_CODE_POWERSHELL`: PowerShell executable used to run a `.ps1`
   `PI_CLAUDE_CODE_COMMAND` (default: `pwsh` when installed, otherwise
   `powershell.exe`).
+- `PI_CLAUDE_CODE_UPSTREAM_URL`: where the turn relay sends Claude Code's
+  Messages requests (default: `https://api.anthropic.com`). Use it to put a
+  local gateway, such as a context-compression proxy, in front of Anthropic.
+  It must be HTTPS or loopback HTTP; a path prefix is kept, so
+  `http://127.0.0.1:8787/bili/https://api.anthropic.com` works. Claude Code's
+  own login is still sent with each request. The relay also forwards a short
+  allowlist of Pi request metadata headers (`x-bili-plugin*`, `x-session-id`,
+  `x-request-id`) that an extension adds in `before_provider_headers`, so the
+  gateway can tell which Pi session a request belongs to. It never forwards
+  other Pi headers and never replaces a header Claude Code sent.
 
 ### Windows
 

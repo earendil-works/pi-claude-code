@@ -801,3 +801,77 @@ test("reports upstream 5xx as retryable and keeps 4xx non-retryable", async () =
   assert.match(invalid.message, /Incomplete Claude Code upstream response \(status 400.*upstream said: bad request/);
   assert.equal(invalid.retryable, false);
 });
+
+test("routes the relay to PI_CLAUDE_CODE_UPSTREAM_URL and forwards Pi metadata headers", async () => {
+  const seen: Array<{ url: string; headers: http.IncomingHttpHeaders }> = [];
+  const server = http.createServer(async (request, response) => {
+    for await (const _chunk of request);
+    seen.push({ url: request.url ?? "", headers: request.headers });
+    response.writeHead(400, { "content-type": "application/json" });
+    response.end(JSON.stringify({ type: "error", error: { type: "invalid_request_error", message: "stop here" } }));
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const port = (server.address() as { port: number }).port;
+
+  const root = await realpath(await mkdtemp(join(tmpdir(), "pi-claude-code-upstream-env-")));
+  const executable = join(root, "fake-claude.mjs");
+  await writeFile(
+    executable,
+    `#!/usr/bin/env node
+import readline from "node:readline";
+if (process.argv.includes("auth") && process.argv.includes("status")) {
+  console.log(JSON.stringify({loggedIn: true, authMethod: "claude.ai", subscriptionType: "max"}));
+  process.exit(0);
+}
+const input = readline.createInterface({input: process.stdin, crlfDelay: Infinity});
+for await (const line of input) {
+  const frame = JSON.parse(line);
+  if (frame.type !== "user") continue;
+  try {
+    const response = await fetch(\`\${process.env.ANTHROPIC_BASE_URL}/v1/messages\`, {
+      method: "POST",
+      headers: {authorization: "Bearer claude-code-oauth"},
+      body: JSON.stringify({messages: [frame.message]}),
+    });
+    await response.text();
+  } catch {}
+  console.log(JSON.stringify({type: "result", subtype: "error_during_execution", is_error: true}));
+}
+`,
+    "utf8",
+  );
+  await chmod(executable, 0o755);
+  // Windows cannot spawn a .mjs file directly; run it through a .cmd shim there.
+  const command =
+    process.platform === "win32"
+      ? await writeFile(join(root, "fake-claude.cmd"), `@"${process.execPath}" "${executable}" %*\r\n`, "utf8").then(() =>
+          join(root, "fake-claude.cmd"),
+        )
+      : executable;
+
+  try {
+    await runClaudeRequest({
+      model: "sonnet",
+      cwd: root,
+      frames: [{ type: "user", message: { role: "user", content: [{ type: "text", text: "hi" }] } }],
+      systemPrompt: "system",
+      manifest: [],
+      extraBody: { tools: [] },
+      env: {
+        PI_CLAUDE_CODE_COMMAND: command,
+        PI_CLAUDE_CODE_UPSTREAM_URL: `http://127.0.0.1:${port}/bili/https://api.anthropic.com`,
+      },
+      headers: { "x-bili-plugin-conversation": "pi-session-1", authorization: "Bearer pi-must-not-win" },
+      timeoutMs: 5_000,
+    }).catch(() => undefined);
+
+    assert.equal(seen.length, 1);
+    assert.equal(seen[0]!.url, "/bili/https://api.anthropic.com/v1/messages");
+    assert.equal(seen[0]!.headers["x-bili-plugin-conversation"], "pi-session-1");
+    assert.equal(seen[0]!.headers.authorization, "Bearer claude-code-oauth");
+  } finally {
+    closeClaudeProcesses();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await rm(root, { recursive: true, force: true });
+  }
+});

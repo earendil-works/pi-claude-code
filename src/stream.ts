@@ -380,6 +380,7 @@ export function streamClaudeCode(
         signal: options?.signal,
         timeoutMs: options?.timeoutMs,
         env: options?.env,
+        headers: options?.headers,
         initialSystemMessages,
         nativeSystemInjections: nativeTranscript?.systemInjections,
         betas: nativeTranscript ? [NATIVE_TOOL_CHANGES_BETA] : undefined,

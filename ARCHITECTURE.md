@@ -87,6 +87,18 @@ tool execution. In particular, it:
 - ties cancellation to the active upstream socket as well as the Claude Code
   process.
 
+The relay forwards to `https://api.anthropic.com` unless
+`PI_CLAUDE_CODE_UPSTREAM_URL` names another HTTPS or loopback HTTP upstream,
+for example a local context-compression gateway in front of Anthropic. This is
+an explicit Pi-side setting, not an inherited Claude Code override: Claude Code
+still authenticates with its own login, the gateway sees the same headers the
+relay would send to Anthropic, and the usage-credit guard still reads Claude
+Code's `rate_limit_event`. The relay also adds an allowlist of Pi request
+metadata headers (`x-bili-plugin*`, `x-session-id`, `x-request-id`, set by
+extensions in `before_provider_headers`) so such a gateway can match a request
+to its Pi session. Pi's provider headers can carry credentials, so no other Pi
+header is added, and a header Claude Code sent is never replaced.
+
 ## Tool schemas
 
 Tool schemas are normalized for Claude Code. Nullable variants and schema
