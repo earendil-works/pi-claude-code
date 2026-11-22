@@ -56,6 +56,12 @@ export interface RunClaudeInput {
   timeoutMs?: number;
   env?: Record<string, string | undefined>;
   upstreamUrl?: string;
+  /**
+   * Request headers Pi assembled for this turn (after extensions' before_provider_headers). The relay forwards
+   * only the `x-` metadata headers among them, so a local gateway on the upstream path can identify the Pi session;
+   * Claude Code's own authentication and API headers always win.
+   */
+  headers?: Record<string, string | null | undefined>;
   /** Native system messages Claude Code injected immediately after that user message. */
   initialSystemMessages?: unknown[];
   /** Pi system/tool deltas to restore at their historical assistant boundaries. */
@@ -570,6 +576,14 @@ function conflictingEnvironment(env: Record<string, string>): string[] {
   return conflicts;
 }
 
+/**
+ * Upstream the turn relay forwards to: an explicit input wins, then PI_CLAUDE_CODE_UPSTREAM_URL (for a local
+ * gateway such as a context-compression proxy), then Anthropic. TurnRelay still accepts only HTTPS or loopback HTTP.
+ */
+function upstreamUrlFor(input: RunClaudeInput, env: Record<string, string>): string {
+  return input.upstreamUrl ?? envValue(env, "PI_CLAUDE_CODE_UPSTREAM_URL") ?? "https://api.anthropic.com";
+}
+
 function processEnvironment(
   input: Record<string, string | undefined> | undefined,
   extraBody: Record<string, unknown>,
@@ -937,7 +951,7 @@ function launchPlan(input: RunClaudeInput): ClaudeLaunchPlan {
       model: input.model,
       systemPrompt: input.systemPrompt,
       timeoutMs,
-      upstreamUrl: input.upstreamUrl ?? "https://api.anthropic.com",
+      upstreamUrl: upstreamUrlFor(input, env),
     }),
   };
 }
@@ -986,7 +1000,7 @@ class ClaudeProcess {
         writeFile(systemPath, input.systemPrompt, "utf8"),
       ]);
 
-      relay = new TurnRelay(input.upstreamUrl ?? "https://api.anthropic.com", plan.timeoutMs);
+      relay = new TurnRelay(upstreamUrlFor(input, plan.env), plan.timeoutMs);
       const env = { ...plan.env, ANTHROPIC_BASE_URL: await relay.start() };
       const mcp = {
         mcpServers: {
@@ -1128,6 +1142,7 @@ class ClaudeProcess {
       deliver,
       (body) => rewriteInitialRequest(body, input.frames, input.initialSystemMessages, input.nativeSystemInjections),
       input.betas,
+      input.headers,
     );
 
     const abort = () => {

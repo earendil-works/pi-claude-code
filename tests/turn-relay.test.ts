@@ -91,6 +91,68 @@ test("relays one upstream Messages request and captures its SSE response", async
   }
 });
 
+test("forwards only allowlisted Pi metadata headers and never overrides Claude Code's headers", async () => {
+  const seen: http.IncomingHttpHeaders[] = [];
+  const upstream = http.createServer(async (request, response) => {
+    for await (const _chunk of request);
+    seen.push(request.headers);
+    response.writeHead(200, { "content-type": "text/event-stream" });
+    response.end(`data: ${JSON.stringify({ type: "message_stop" })}\n\n`);
+  });
+  const upstreamPort = await listen(upstream);
+  // A path prefix on the upstream, as a local gateway lane such as `/bili/https://api.anthropic.com` uses.
+  const relay = new TurnRelay(`http://127.0.0.1:${upstreamPort}/gateway/https://api.anthropic.com`, 5_000);
+  const paths: string[] = [];
+  upstream.prependListener("request", (request) => paths.push(request.url ?? ""));
+
+  try {
+    const baseUrl = await relay.start();
+    relay.beginTurn(undefined, undefined, [], {
+      "x-bili-plugin-conversation": "pi-session-1",
+      "X-Bili-Plugin": "pi",
+      "x-request-id": "from-pi",
+      "x-claude-code-session-id": "must-not-leak",
+      "x-api-key": "must-not-leak",
+      "x-auth-token": "must-not-leak",
+      "x-goog-api-key": "must-not-leak",
+      "x-stainless-os": "must-not-leak",
+      "x-bili-plugin-model": null,
+      authorization: "Bearer must-not-leak",
+      "anthropic-version": "must-not-leak",
+    });
+    const response = await fetch(`${baseUrl}/v1/messages`, {
+      method: "POST",
+      // x-request-id is forwardable, so this pins the no-override rule.
+      headers: { authorization: "Bearer from-claude-code", "x-request-id": "from-claude-code" },
+      body: "{}",
+    });
+    assert.equal(response.status, 200);
+    await response.text();
+    await relay.settled();
+
+    assert.equal(paths[0], "/gateway/https://api.anthropic.com/v1/messages");
+    const headers = seen[0]!;
+    assert.equal(headers["x-bili-plugin-conversation"], "pi-session-1");
+    assert.equal(headers["x-bili-plugin"], "pi");
+    assert.equal(headers.authorization, "Bearer from-claude-code");
+    assert.equal(headers["x-request-id"], "from-claude-code");
+    for (const name of ["x-claude-code-session-id", "x-api-key", "x-auth-token", "x-goog-api-key", "x-stainless-os", "x-bili-plugin-model", "anthropic-version"]) {
+      assert.equal(headers[name], undefined, name);
+    }
+
+    // A later turn without Pi headers forwards none.
+    relay.finishTurn();
+    relay.beginTurn();
+    const next = await fetch(`${baseUrl}/v1/messages`, { method: "POST", body: "{}" });
+    await next.text();
+    await relay.settled();
+    assert.equal(seen[1]!["x-bili-plugin-conversation"], undefined);
+  } finally {
+    await relay.close();
+    await new Promise<void>((resolve) => upstream.close(() => resolve()));
+  }
+});
+
 test("surfaces an error event from an otherwise successful SSE stream", async () => {
   const upstream = http.createServer(async (request, response) => {
     for await (const _chunk of request);

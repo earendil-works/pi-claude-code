@@ -112,6 +112,23 @@ const STRIPPED_REQUEST_HEADERS = new Set([
 const STRIPPED_RESPONSE_HEADERS = new Set(["connection", "transfer-encoding", "server", "date"]);
 
 /**
+ * Pi request headers the relay may add to Claude Code's request, so a local gateway on the upstream path can match the
+ * request to its Pi session. This is an allowlist of metadata names: Pi's provider headers can also carry credentials
+ * (`x-api-key`, `x-auth-token`, `x-goog-api-key`, ...), and those must never reach the upstream. The relay never
+ * replaces a header Claude Code already sent.
+ */
+const FORWARDED_PI_HEADER = /^(?:x-bili-plugin(?:-[a-z0-9-]+)?|x-session-id|x-request-id)$/u;
+
+function forwardablePiHeaders(headers: Record<string, string | null | undefined> | undefined): Array<[string, string]> {
+  const out: Array<[string, string]> = [];
+  for (const [rawName, value] of Object.entries(headers ?? {})) {
+    const name = rawName.toLowerCase();
+    if (typeof value === "string" && FORWARDED_PI_HEADER.test(name)) out.push([name, value]);
+  }
+  return out;
+}
+
+/**
  * Describe a relay failure without losing what Node puts outside `message`:
  * connection errors carry their reason in `code`, and a connection attempt to
  * every address of a host fails with an `AggregateError` that has no message.
@@ -150,6 +167,7 @@ export class TurnRelay {
   private baseUrl?: string;
   private transformRequest?: (body: Buffer) => Buffer;
   private requestBetas: string[] = [];
+  private piHeaders: Array<[string, string]> = [];
 
   constructor(
     upstream = "https://api.anthropic.com",
@@ -183,6 +201,7 @@ export class TurnRelay {
     onEvent?: (event: AnthropicStreamEvent) => void,
     transformRequest?: (body: Buffer) => Buffer,
     requestBetas: string[] = [],
+    piHeaders?: Record<string, string | null | undefined>,
   ): void {
     if (this.closed) throw new Error("Claude Code turn relay is closed");
     if (this.active.size > 0) throw new Error("Claude Code turn relay still has an active request");
@@ -198,6 +217,7 @@ export class TurnRelay {
     this.requestBody = undefined;
     this.transformRequest = transformRequest;
     this.requestBetas = requestBetas;
+    this.piHeaders = forwardablePiHeaders(piHeaders);
     this.cancelled = false;
   }
 
@@ -286,6 +306,9 @@ export class TurnRelay {
       const headers: http.OutgoingHttpHeaders = {};
       for (const [name, value] of Object.entries(request.headers)) {
         if (!STRIPPED_REQUEST_HEADERS.has(name.toLowerCase()) && value !== undefined) headers[name] = value;
+      }
+      for (const [name, value] of this.piHeaders) {
+        if (headers[name] === undefined) headers[name] = value;
       }
       headers["accept-encoding"] = "identity";
       headers["content-length"] = body.length;
