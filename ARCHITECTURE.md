@@ -45,6 +45,17 @@ ask for usage credits (for example third-party app classification) are
 rewritten into the same kind of error. The latest rate-limit status is attached
 to the assistant message as a `claude-code.rate-limit` diagnostic.
 
+## Working directory
+
+Claude Code tells the model the directory it was started in. Pi does not pass
+the session cwd to providers, so each request reads it from the `cwd` section
+of Pi's structured system prompt and starts Claude Code there. This keeps
+sessions created with `createAgentSession({ cwd })` in one Pi process in their
+own directories. The section is read by name, so `<cwd>` text elsewhere in the
+prompt is ignored. Without the section, or when it does not name an existing
+absolute directory, workers use Pi's process cwd; an unusable section adds a
+`claude-code.cwd-fallback` diagnostic to the assistant message.
+
 ## Process reuse
 
 Linear conversations may reuse a warm Claude Code process. Only exact linear
