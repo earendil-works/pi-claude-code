@@ -596,6 +596,7 @@ function processEnvironment(
     DISABLE_AUTO_COMPACT: "1",
     DISABLE_COMPACT: "1",
     CLAUDE_CODE_TOTAL_TOKENS_REMINDER: "off",
+    CLAUDE_CODE_SILENT_TURN_REMINDER: "off",
     DISABLE_ERROR_REPORTING: "1",
   });
   // These flags also disable the feature flags that unlock Claude Code's served
