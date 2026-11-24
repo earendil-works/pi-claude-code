@@ -588,6 +588,10 @@ function processEnvironment(
     DISABLE_FEEDBACK_COMMAND: "1",
     CLAUDE_CODE_DISABLE_OFFICIAL_MARKETPLACE_AUTOINSTALL: "1",
     CLAUDE_CODE_DISABLE_FILE_MENTIONS: "1",
+    // Claude Code would otherwise add attachment notes (such as an "@-mentioned"
+    // notice for any @token) to its native system messages, which the relay
+    // records and replays.
+    CLAUDE_CODE_DISABLE_ATTACHMENTS: "1",
     // Claude Code would add these as reminders to user messages and tool
     // results. The relay also strips anything else it adds there.
     CLAUDE_CODE_DISABLE_AUTO_MEMORY: "1",
