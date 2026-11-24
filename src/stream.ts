@@ -1,7 +1,11 @@
+import { stat } from "node:fs/promises";
+import { isAbsolute } from "node:path";
 import {
+  appendAssistantMessageDiagnostic,
   calculateCost,
   collapseSystemMessages,
   createAssistantMessageEventStream,
+  getCurrentSystemMessage,
   getCurrentSystemPrompt,
   getCurrentTools,
   getInitialSystemMessage,
@@ -327,6 +331,37 @@ export function normalizeError(error: unknown): string {
   return message;
 }
 
+const CWD_SECTION = /^<cwd>\n([^\n]+)\n<\/cwd>$/u;
+
+interface SessionCwd {
+  cwd: string;
+  /** Set when the session named a cwd that could not be used. */
+  rejected?: { cwd: string; reason: "not-absolute" | "not-a-directory" };
+}
+
+/**
+ * Pi passes no cwd to providers, but its structured system prompt carries the
+ * session cwd as the `cwd` section. Read that section by name, not by searching
+ * the rendered prompt, so project instructions or extension sections that
+ * contain `<cwd>` text cannot redirect Claude Code.
+ */
+async function resolveSessionCwd(messages: TranscriptContext["messages"]): Promise<SessionCwd> {
+  const section = getCurrentSystemMessage(messages)?.sections?.cwd;
+  const requested = section ? CWD_SECTION.exec(section)?.[1] : undefined;
+  if (requested === undefined) return { cwd: process.cwd() };
+  if (!isAbsolute(requested)) {
+    return { cwd: process.cwd(), rejected: { cwd: requested, reason: "not-absolute" } };
+  }
+  const isDirectory = await stat(requested).then(
+    (stats) => stats.isDirectory(),
+    () => false,
+  );
+  if (!isDirectory) {
+    return { cwd: process.cwd(), rejected: { cwd: requested, reason: "not-a-directory" } };
+  }
+  return { cwd: requested };
+}
+
 export function streamClaudeCode(
   model: Model<any>,
   sourceContext: TranscriptContext,
@@ -369,10 +404,19 @@ export function streamClaudeCode(
       );
       const translator = new EventTranslator(model, output, stream);
 
+      const sessionCwd = await resolveSessionCwd(sourceContext.messages);
+      if (sessionCwd.rejected) {
+        appendAssistantMessageDiagnostic(output, {
+          type: "claude-code.cwd-fallback",
+          timestamp: Date.now(),
+          details: { ...sessionCwd.rejected, fallback: sessionCwd.cwd },
+        });
+      }
+
       stream.push({ type: "start", partial: output });
       const response = await runClaudeRequest({
         model: nativeModel(model.id),
-        cwd: process.cwd(),
+        cwd: sessionCwd.cwd,
         frames,
         systemPrompt,
         manifest: preparedTools.manifest,
