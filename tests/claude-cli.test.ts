@@ -47,6 +47,17 @@ function rewrite(
 
 const withoutMarkers = (value: unknown): unknown => JSON.parse(JSON.stringify(value, (key, child) => (key === "cache_control" ? undefined : child)));
 
+/** Number of cache_control markers anywhere in a value. */
+const count = (value: unknown): number =>
+  Array.isArray(value)
+    ? value.reduce((sum: number, child) => sum + count(child), 0)
+    : value && typeof value === "object"
+      ? Object.entries(value).reduce(
+          (sum: number, [key, child]) => sum + (key === "cache_control" ? 1 : count(child)),
+          0,
+        )
+      : 0;
+
 test("stabilizes Claude Code's native replay reminders and cache breakpoint", () => {
   const initialSystemMessages = [
     {
@@ -314,19 +325,152 @@ test("keeps one breakpoint in a pre-marked multi-block final message (issue #10)
       [],
     ).toString("utf8"),
   );
-  const count = (value: unknown): number =>
-    Array.isArray(value)
-      ? value.reduce((sum: number, child) => sum + count(child), 0)
-      : value && typeof value === "object"
-        ? Object.entries(value).reduce(
-            (sum: number, [key, child]) => sum + (key === "cache_control" ? 1 : count(child)),
-            0,
-          )
-        : 0;
   assert.ok(count(rewritten) <= 4, `found ${count(rewritten)} cache_control markers`);
   const final = rewritten.messages.at(-1).content as Array<Record<string, unknown>>;
   assert.equal(final[0]?.cache_control, undefined);
   assert.deepEqual(final.at(-1)?.cache_control, marker);
+});
+
+type WirePayload = { tools?: Block[]; system?: Block[]; messages: WireMessage[] };
+
+function rewritePayload(
+  body: WirePayload,
+  frames: NativeFrame[],
+  initialSystemMessages?: unknown[],
+  injections?: Parameters<typeof rewriteInitialRequest>[3],
+): WirePayload {
+  const output = rewriteInitialRequest(Buffer.from(JSON.stringify(body)), frames, initialSystemMessages, injections);
+  return JSON.parse(output.toString("utf8")) as WirePayload;
+}
+
+test("keeps four breakpoints when a system update trails the last user message", () => {
+  // A Pi system-prompt update recorded just before the newest user message
+  // becomes a trailing system message after Claude Code's marked last user.
+  const marker = { type: "ephemeral", ttl: "1h" };
+  const canonical = [
+    { role: "user", content: [text("inspect")] },
+    { role: "assistant", content: [{ type: "tool_use", id: "t1", name: "mcp__pi__read", input: {} }] },
+    { role: "user", content: [{ type: "tool_result", tool_use_id: "t1", content: "one" }] },
+    { role: "assistant", content: [{ type: "tool_use", id: "t2", name: "mcp__pi__read", input: {} }] },
+    { role: "user", content: [{ type: "tool_result", tool_use_id: "t2", content: "two" }] },
+    { role: "assistant", content: [{ type: "tool_use", id: "t3", name: "mcp__pi__read", input: {} }] },
+    { role: "user", content: [{ type: "tool_result", tool_use_id: "t3", content: "three" }] },
+    { role: "assistant", content: [text("done")] },
+    { role: "user", content: [text("follow up")] },
+  ];
+  const wire = structuredClone(canonical) as WireMessage[];
+  wire.splice(1, 0, { role: "system", content: [text("environment")] });
+  wire.at(-1)!.content = [text(account), { ...text("follow up"), cache_control: marker }];
+  const rewritten = rewritePayload(
+    {
+      tools: [{ name: "mcp__pi__read", input_schema: { type: "object" }, cache_control: marker }],
+      system: [
+        { type: "text", text: "identity", cache_control: marker },
+        { type: "text", text: "prompt", cache_control: marker },
+      ],
+      messages: wire,
+    },
+    framesFor(canonical),
+    [{ role: "system", content: [{ type: "text", text: "environment", cache_control: marker }] }],
+    [{ beforeAssistant: null, content: [text("system prompt section updated")] }],
+  );
+
+  assert.ok(count(rewritten) <= 4, `found ${count(rewritten)} cache_control markers`);
+  assert.equal(rewritten.messages.at(-1)?.role, "system");
+  assert.deepEqual((rewritten.messages.at(-1)?.content as Block[]).at(-1)?.cache_control, marker);
+  const users = rewritten.messages.filter((message) => message.role === "user");
+  assert.equal(count(users.at(-1)), 0);
+  assert.deepEqual(
+    withoutMarkers(rewritten.messages.filter((message) => message.role !== "system")),
+    canonical,
+  );
+});
+
+test("never emits more than four breakpoints across replay shapes", () => {
+  const marker = { type: "ephemeral", ttl: "1h" };
+  let checked = 0;
+  for (const userCount of [1, 2, 3, 5]) {
+    for (const nativeMarker of ["none", "last user", "trailing system", "both"]) {
+      for (const trailingInjection of [false, true]) {
+        for (const assistantInjection of [false, true]) {
+          for (const withInitial of [false, true]) {
+            for (const withInjections of [false, true]) {
+              for (const toolMarker of [false, true]) {
+                for (const systemMarkers of [1, 2]) {
+                  // Not constructible: no assistant to inject before, or
+                  // injections without an injections argument.
+                  if (assistantInjection && userCount < 2) continue;
+                  if (!withInjections && (trailingInjection || assistantInjection)) continue;
+
+                  const canonical: WireMessage[] = [{ role: "user", content: [text("inspect")] }];
+                  for (let turn = 1; turn < userCount; turn++) {
+                    const id = `t${turn}`;
+                    canonical.push(
+                      { role: "assistant", content: [{ type: "tool_use", id, name: "mcp__pi__read", input: {} }] },
+                      { role: "user", content: [{ type: "tool_result", tool_use_id: id, content: `result ${turn}` }] },
+                    );
+                  }
+                  const wire = structuredClone(canonical);
+                  wire.splice(1, 0, { role: "system", content: [text("environment")] });
+                  if (nativeMarker === "last user" || nativeMarker === "both") {
+                    const last = wire.findLast((message) => message.role === "user")!.content as Block[];
+                    last[last.length - 1] = { ...last.at(-1)!, cache_control: marker };
+                  }
+                  if (nativeMarker === "trailing system" || nativeMarker === "both") {
+                    wire.push({ role: "system", content: [{ ...text("token reminder"), cache_control: marker }] });
+                  }
+                  const injections = withInjections
+                    ? [
+                        ...(assistantInjection ? [{ beforeAssistant: 0, content: [text("tools changed")] }] : []),
+                        ...(trailingInjection ? [{ beforeAssistant: null, content: [text("prompt updated")] }] : []),
+                      ]
+                    : undefined;
+                  const system = [
+                    { type: "text", text: "identity", ...(systemMarkers === 2 ? { cache_control: marker } : {}) },
+                    { type: "text", text: "prompt", cache_control: marker },
+                  ];
+                  const shape = JSON.stringify({
+                    userCount,
+                    nativeMarker,
+                    trailingInjection,
+                    assistantInjection,
+                    withInitial,
+                    withInjections,
+                    toolMarker,
+                    systemMarkers,
+                  });
+
+                  const rewritten = rewritePayload(
+                    {
+                      tools: [
+                        { name: "mcp__pi__read", input_schema: { type: "object" }, ...(toolMarker ? { cache_control: marker } : {}) },
+                      ],
+                      system,
+                      messages: wire,
+                    },
+                    framesFor(canonical),
+                    withInitial ? [{ role: "system", content: [{ ...text("environment"), cache_control: marker }] }] : undefined,
+                    injections,
+                  );
+                  assert.ok(count(rewritten) <= 4, `${shape}: found ${count(rewritten)} cache_control markers`);
+                  if (withInitial || withInjections) {
+                    assert.deepEqual((rewritten.messages.at(-1)?.content as Block[]).at(-1)?.cache_control, marker, shape);
+                  }
+                  assert.deepEqual(
+                    withoutMarkers(rewritten.messages.filter((message) => message.role !== "system")),
+                    canonical,
+                    shape,
+                  );
+                  checked += 1;
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+  assert.equal(checked, 576, "every constructible shape is checked");
 });
 
 const userFrame = (text: string) => ({

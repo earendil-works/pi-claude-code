@@ -713,18 +713,50 @@ function setReplayCacheBreakpoints(messages: NativeRequestMessage[]): void {
   const userIndexes = messages
     .map((message, index) => (message.role === "user" ? index : -1))
     .filter((index) => index >= 0);
-  if (userIndexes.length >= 3) {
-    // Claude permits four cache breakpoints. Its two system-prompt markers
-    // consume half of them, so once a prior queried user exists, move the
-    // native environment marker to that exact previous query boundary. This
-    // avoids relying on automatic lookback (notably unreliable with images).
-    for (const message of messages) {
-      if (message.role === "system") message.content = withoutCacheControl(message.content);
-    }
-    setCacheBreakpoint(messages[userIndexes.at(-2)!]!);
+  // Claude permits four cache breakpoints. Its system prompt and tools take
+  // two, so once a prior queried user exists, move the native environment
+  // marker to that exact previous query boundary. This avoids relying on
+  // automatic lookback (notably unreliable with images).
+  const boundary = userIndexes.length >= 3 ? userIndexes.at(-2)! : undefined;
+  const kept = new Set<number>(boundary === undefined ? [] : [boundary]);
+  if (boundary === undefined) {
+    for (let index = 1; messages[index]?.role === "system"; index++) kept.add(index);
   }
+  // Every other marker goes, e.g. Claude Code's on the last user message once
+  // a trailing system message follows it.
+  messages.forEach((message, index) => {
+    if (!kept.has(index)) message.content = withoutCacheControl(message.content);
+  });
+  if (boundary !== undefined) setCacheBreakpoint(messages[boundary]!);
   const final = messages.at(-1);
   if (final) setCacheBreakpoint(final);
+}
+
+const MAX_CACHE_BREAKPOINTS = 4;
+
+function countCacheControl(value: unknown): number {
+  if (Array.isArray(value)) return value.reduce((sum: number, child) => sum + countCacheControl(child), 0);
+  if (!value || typeof value !== "object") return 0;
+  return Object.entries(value).reduce(
+    (sum: number, [key, child]) => sum + (key === "cache_control" ? 1 : countCacheControl(child)),
+    0,
+  );
+}
+
+/**
+ * Last guard: more than four markers is a 400 that kills the turn, while a
+ * dropped marker only costs cache reuse. Drop message markers oldest first,
+ * keeping the final message's.
+ */
+function capCacheBreakpoints(payload: { tools?: unknown; system?: unknown; messages?: NativeRequestMessage[] }): void {
+  const messages = payload.messages ?? [];
+  let total = countCacheControl([payload.tools, payload.system, messages]);
+  for (let index = 0; index < messages.length - 1 && total > MAX_CACHE_BREAKPOINTS; index++) {
+    const markers = countCacheControl(messages[index]);
+    if (!markers) continue;
+    messages[index] = withoutCacheControl(messages[index]) as NativeRequestMessage;
+    total -= markers;
+  }
 }
 
 type ContentBlock = Record<string, unknown>;
@@ -856,6 +888,7 @@ export function rewriteInitialRequest(
   const payload = JSON.parse(body.toString("utf8")) as {
     messages?: NativeRequestMessage[];
     system?: unknown;
+    tools?: unknown;
   };
   let messages = payload.messages;
   const first = messages?.[0];
@@ -885,6 +918,7 @@ export function rewriteInitialRequest(
     normalizeLeadingSystemCache(payload.system);
   }
   if (initialSystemMessages?.length || nativeSystemInjections) setReplayCacheBreakpoints(messages!);
+  capCacheBreakpoints(payload);
 
   return Buffer.from(JSON.stringify(payload));
 }
