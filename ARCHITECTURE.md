@@ -78,9 +78,12 @@ tool execution. In particular, it:
   those reminders are not created in the first place. If a request no longer
   lines up with Pi's history, the turn fails rather than sending a guess;
 - records Claude Code's initial native system messages (environment, date),
-  then restores their stable layout during full-history replay. It also adjusts
-  cache breakpoints so tool rounds do not continually invalidate the
-  prompt-cache prefix;
+  then restores their stable layout during full-history replay. When the date
+  changes during a session, it moves the newest date reminder to the end of the
+  request and drops older ones, so warm and fresh turns share a prefix. It also
+  adjusts cache breakpoints so tool rounds do not continually invalidate the
+  prompt-cache prefix, and keeps the final breakpoint off trailing system
+  messages;
 - injects supported mid-conversation tool additions and removals at their
   original assistant boundaries and adds the corresponding Anthropic beta
   header; and
