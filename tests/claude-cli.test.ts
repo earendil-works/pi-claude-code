@@ -325,8 +325,12 @@ test("injects native system history at assistant boundaries", () => {
     ttl: "1h",
   });
   assert.deepEqual(
-    (rewritten.messages.at(-1)?.content as Array<Record<string, unknown>>).at(-1)?.cache_control,
+    (rewritten.messages[4]?.content as Array<Record<string, unknown>>).at(-1)?.cache_control,
     { type: "ephemeral", ttl: "1h" },
+  );
+  assert.equal(
+    (rewritten.messages.at(-1)?.content as Array<Record<string, unknown>>).at(-1)?.cache_control,
+    undefined,
   );
 });
 
@@ -373,9 +377,12 @@ test("keeps one breakpoint in a pre-marked multi-block final message (issue #10)
           )
         : 0;
   assert.ok(count(rewritten) <= 4, `found ${count(rewritten)} cache_control markers`);
-  const final = rewritten.messages.at(-1).content as Array<Record<string, unknown>>;
-  assert.equal(final[0]?.cache_control, undefined);
-  assert.deepEqual(final.at(-1)?.cache_control, marker);
+  const trailing = rewritten.messages.at(-1).content as Array<Record<string, unknown>>;
+  assert.deepEqual(
+    trailing.map((block) => block.cache_control),
+    [undefined, undefined],
+  );
+  assert.deepEqual((rewritten.messages[3].content as Array<Record<string, unknown>>).at(-1)?.cache_control, marker);
 });
 
 const userFrame = (text: string) => ({

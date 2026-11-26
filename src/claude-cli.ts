@@ -723,8 +723,18 @@ function setReplayCacheBreakpoints(messages: NativeRequestMessage[]): void {
     }
     setCacheBreakpoint(messages[userIndexes.at(-2)!]!);
   }
-  const final = messages.at(-1);
-  if (final) setCacheBreakpoint(final);
+
+  // The final breakpoint goes on the newest non-system message. A date reminder
+  // after it moves to the new end on the next turn, so a breakpoint on it would
+  // cache a prefix that the next turn cannot read.
+  const finalIndex = messages.findLastIndex((message) => message.role !== "system");
+  for (const message of messages.slice(finalIndex + 1)) {
+    message.content = withoutCacheControl(message.content);
+  }
+
+  if (finalIndex >= 0) {
+    setCacheBreakpoint(messages[finalIndex]!);
+  }
 }
 
 type ContentBlock = Record<string, unknown>;
