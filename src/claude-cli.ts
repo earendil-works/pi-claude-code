@@ -857,6 +857,22 @@ function normalizeLeadingSystemCache(system: unknown): void {
   }
 }
 
+/** Index after the system messages that follow the first user message. */
+function leadingSystemEnd(messages: NativeRequestMessage[]): number {
+  let end = 1;
+  while (messages[end]?.role === "system") end += 1;
+
+  return end;
+}
+
+/** The text of the system messages that follow the first user message. */
+function leadingSystemText(messages: NativeRequestMessage[]): string {
+  return messages
+    .slice(1, leadingSystemEnd(messages))
+    .map((message) => contentText(message.content))
+    .join("\n");
+}
+
 /**
  * Drop later system messages that only repeat the leading ones. Claude Code
  * appends a date reminder after the newest message when it replays a history,
@@ -865,17 +881,65 @@ function normalizeLeadingSystemCache(system: unknown): void {
  * prompt cache misses. The leading environment message already carries it.
  */
 function withoutRepeatedSystemMessages(messages: NativeRequestMessage[]): NativeRequestMessage[] {
-  let leadingEnd = 1;
-  while (messages[leadingEnd]?.role === "system") leadingEnd += 1;
-  const leadingText = messages
-    .slice(1, leadingEnd)
-    .map((message) => contentText(message.content))
-    .join("\n");
+  const leadingEnd = leadingSystemEnd(messages);
+  const leadingText = leadingSystemText(messages);
+
   return messages.filter((message, index) => {
-    if (index < leadingEnd || message.role !== "system") return true;
+    if (index < leadingEnd || message.role !== "system") {
+      return true;
+    }
+
     const text = contentText(message.content);
+
     return !text || !leadingText.includes(text);
   });
+}
+
+const DATE_REMINDER = /^Today's date is \d{4}-\d{2}-\d{2}\.$/u;
+
+/** The text of a block that holds only Claude Code's date reminder. */
+function dateReminderText(block: unknown): string | undefined {
+  const text = isBlock(block) && block.type === "text" && typeof block.text === "string" ? block.text.trim() : "";
+
+  return DATE_REMINDER.test(text) ? text : undefined;
+}
+
+/**
+ * Move Claude Code's newest date reminder to the end of the request. After the
+ * date changes, the reminder no longer repeats the leading block, and a warm
+ * process keeps it where its previous request ended while a fresh one appends
+ * it after the newest message. At the end, after the final cache breakpoint,
+ * both layouts share the prefix and the model still learns the new date.
+ * Older date reminders past the leading block, and one that repeats the
+ * leading block, are dropped.
+ */
+function withDateReminderAtEnd(messages: NativeRequestMessage[]): NativeRequestMessage[] {
+  const leadingEnd = leadingSystemEnd(messages);
+  const dates: string[] = [];
+  const output = messages.flatMap((message, index) => {
+    const blocks = typeof message.content === "string" ? [{ type: "text", text: message.content }] : message.content;
+
+    if (index < leadingEnd || message.role !== "system" || !Array.isArray(blocks)) {
+      return [message];
+    }
+
+    const rest = blocks.filter((block) => dateReminderText(block) === undefined);
+    dates.push(...blocks.map(dateReminderText).filter((date) => date !== undefined));
+
+    if (rest.length === blocks.length) {
+      return [message];
+    }
+
+    return rest.length ? [{ ...message, content: rest }] : [];
+  });
+
+  const newest = dates.at(-1);
+
+  if (!newest || leadingSystemText(messages).includes(newest)) {
+    return output;
+  }
+
+  return [...output, { role: "system", content: newest }];
 }
 
 export function rewriteInitialRequest(
@@ -901,7 +965,7 @@ export function rewriteInitialRequest(
     messages.splice(1, systemEnd - 1, ...(structuredClone(initialSystemMessages) as NativeRequestMessage[]));
   }
   if (messages) {
-    messages = withoutRepeatedSystemMessages(messages);
+    messages = withDateReminderAtEnd(withoutRepeatedSystemMessages(messages));
     payload.messages = messages;
   }
 
