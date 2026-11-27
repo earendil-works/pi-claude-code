@@ -489,8 +489,29 @@ function childExit(child: ChildProcess): Promise<number> {
   });
 }
 
-export function killProcessTree(child: ChildProcess): void {
-  if (child.exitCode !== null || child.pid === undefined) return;
+/** How long Claude Code gets to exit after SIGTERM before it is killed. */
+export const KILL_GRACE_MS = 2_000;
+
+function signalTree(child: ChildProcess, signal: NodeJS.Signals): void {
+  try {
+    process.kill(-child.pid!, signal);
+  } catch {
+    try {
+      child.kill(signal);
+    } catch {
+      // It exited between the checks.
+    }
+  }
+}
+
+/**
+ * End Claude Code and what it started. SIGTERM first: on it Claude Code removes
+ * the files it registers each running session with (`~/.claude/sessions/<pid>.json`,
+ * its `.key`, and the messaging socket), which SIGKILL leaves behind. SIGKILL
+ * follows after `graceMs`, or at once if Pi itself exits first.
+ */
+export function killProcessTree(child: ChildProcess, graceMs = KILL_GRACE_MS): void {
+  if (child.exitCode !== null || child.signalCode !== null || child.pid === undefined) return;
   if (process.platform === "win32") {
     const killer = spawn("taskkill", ["/F", "/T", "/PID", String(child.pid)], {
       stdio: "ignore",
@@ -499,15 +520,17 @@ export function killProcessTree(child: ChildProcess): void {
     killer.unref();
     return;
   }
-  try {
-    process.kill(-child.pid, "SIGKILL");
-  } catch {
-    try {
-      child.kill("SIGKILL");
-    } catch {
-      // It exited between the checks.
-    }
-  }
+  signalTree(child, "SIGTERM");
+  const kill = () => signalTree(child, "SIGKILL");
+  const timer = setTimeout(kill, graceMs);
+  timer.unref();
+  process.once("exit", kill);
+  child.once("exit", () => {
+    clearTimeout(timer);
+    process.removeListener("exit", kill);
+    // The group may still hold what Claude Code started.
+    signalTree(child, "SIGKILL");
+  });
 }
 
 class AsyncQueue<T> {
