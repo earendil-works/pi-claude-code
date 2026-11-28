@@ -123,6 +123,17 @@ test("strips reminders when the first user message carries none (issue #27)", ()
   );
 });
 
+test("accepts a string first user message from a slash-like prompt", () => {
+  const prompt = "/tmp/photo.jpg what is this?";
+  const canonical = [
+    { role: "user", content: [text(prompt)] },
+    { role: "assistant", content: [{ type: "tool_use", id: "t1", name: "read", input: {} }] },
+    { role: "user", content: [{ type: "tool_result", tool_use_id: "t1", content: "result" }] },
+  ];
+  const wire = [{ role: "user", content: prompt }, ...canonical.slice(1)];
+  assert.deepEqual(withoutMarkers(rewrite(wire, framesFor(canonical))), canonical);
+});
+
 test("strips reminder tails from tool results whatever their separator or subset", () => {
   const canonicalResult = { type: "tool_result", tool_use_id: "t1", content: "result" };
   const frames = framesFor([
